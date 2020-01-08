@@ -30,7 +30,6 @@ import Graphics.UI.Gtk (PangoRectangle(..), layoutGetExtents, showLayout,
 import qualified Graphics.UI.Gtk as Gtk
 import Graphics.Rendering.Cairo hiding (width, height, x, y)
 
-import Control.Concurrent
 import Control.Concurrent.STM
 import Control.Monad
 
@@ -170,8 +169,8 @@ draw s rw2 rh2 = do
 -- | Handle a mouse click. If an object was clicked an 'UpdateSignal' is sent
 --   that causes the object to be evaluated and the screen to be updated.
 click :: IO ()
-click = do
-  s <- readTVarIO state
+click = atomically $ do
+  s <- readTVar state
 
   hm <- inHistoryMode
   unless hm $ case hover s of
@@ -179,37 +178,37 @@ click = do
       evaluate t
       -- Without forkIO it would hang indefinitely if some action is currently
       -- executed
-      void $ forkIO $ putMVar visSignal UpdateSignal
+      writeTQueue visSignal UpdateSignal
     _ -> return ()
 
 -- | Handle a mouse move. Causes an 'UpdateSignal' if the mouse is hovering a
 --   different object now, so the object gets highlighted and the screen
 --   updated.
-move :: WidgetClass w => w -> IO ()
+move :: WidgetClass self => self -> STM (IO ())
 move canvas = do
-  vS <- readTVarIO visState
-  oldS <- readTVarIO state
+  vS <- readTVar visState
+  oldS <- readTVar state
   let oldHover = hover oldS
 
-  atomically $ modifyTVar' state $ \s' ->
+  modifyTVar' state $ \s' ->
     let (mx, my) = mousePos vS
         check' (o, (x,y,w,h)) =
           if x <= mx && mx <= x + w &&
              y <= my && my <= y + h
           then Just o else Nothing
     in s' {hover = msum $ map check' (bounds s')}
-  s <- readTVarIO state
-  unless (oldHover == hover s) $ widgetQueueDraw canvas
+  s <- readTVar state
+  return $ unless (oldHover == hover s) $ widgetQueueDraw canvas
 
 -- | Something might have changed on the heap, update the view.
 updateObjects :: [NamedBox] -> IO ()
-updateObjects boxes = do
+updateObjects boxes = atomically $ do
   os <- parseBoxes
   --(h, is) <- multiBuildHeapGraph 100 $ map fst boxes
   -- This is wrong
   --let os = visHeapGraph (zipWith (\(b,i) (b',n) -> (i,n)) is boxes) h
   let objs = zipWith (\(y,x) z -> (x,intercalate ", " y,z)) boxes os
-  atomically $ modifyTVar' state (\s -> s {objects = objs, hover = Nothing})
+  modifyTVar' state (\s -> s {objects = objs, hover = Nothing})
 
 drawEntry :: State -> Double -> Double -> ([VisObject], Double, String) -> Render [(String, Rectangle)]
 drawEntry s nameWidth xPos (obj, pos, name) = do

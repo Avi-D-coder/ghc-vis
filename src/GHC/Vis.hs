@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, RankNTypes, ImpredicativeTypes, OverloadedStrings #-}
+{-# LANGUAGE CPP, ImpredicativeTypes, OverloadedStrings #-}
 {- |
    Module      : GHC.Vis
    Copyright   : (c) Dennis Felsing
@@ -67,6 +67,7 @@ import Control.Monad.IO.Class
 import Control.Monad.Trans.Class
 
 import Control.Exception hiding (evaluate)
+import Control.Arrow
 
 import Data.Char
 import Data.Version
@@ -165,49 +166,49 @@ svis = do
 
 -- | Add expressions with a name to the visualization window.
 view :: a -> String -> IO ()
-view a name = put $ NewSignal (asBox a) name
+view a name = atomically $ put $ NewSignal (asBox a) name
 
 -- | Evaluate an object that is shown in the visualization. (Names start with 't')
-eval :: String -> IO ()
+eval :: String -> STM ()
 eval t = evaluate t >> update
 
 -- | Switch between the list view and the graph view
-switch :: IO ()
+switch :: STM ()
 switch = put SwitchSignal
 
 -- | When an object is updated by accessing it, you have to call this to
 --   refresh the visualization window. You can also click on an object to force
 --   an update.
-update :: IO ()
+update :: STM ()
 update = put UpdateSignal
 
 -- | Clear the visualization window, removing all expressions from it
-clear :: IO ()
+clear :: STM ()
 clear = put ClearSignal
 
 -- | Reset the hidden boxes
-restore :: IO ()
+restore :: STM ()
 restore = put RestoreSignal
 
 -- | Change position in history
-history :: (Int -> Int) -> IO ()
+history :: (Int -> Int) -> STM ()
 history = put . HistorySignal
 
 -- | Set the maximum depth for following closures on the heap
-setDepth :: Int -> IO ()
+setDepth :: Int -> STM ()
 setDepth newDepth
-  | newDepth > 0 = atomically $ modifyTVar' visState (\s -> s {heapDepth = newDepth})
+  | newDepth > 0 = modifyTVar' visState (\s -> s {heapDepth = newDepth})
   | otherwise    = error "Heap depth has to be positive"
 
-zoom :: WidgetClass w => w -> (Double -> Double) -> IO ()
+zoom :: WidgetClass w => w -> (Double -> Double) -> STM (IO ())
 zoom canvas f = do
-  state <- readTVarIO visState
+  state <- readTVar visState
 
   let newZoomRatio = f $ zoomRatio state
-  newPos <- zoomImage canvas state newZoomRatio (mousePos state)
-  atomically $ modifyTVar' visState (\s -> s {zoomRatio = newZoomRatio, position = newPos})
+      newPos = zoomImage canvas state newZoomRatio (mousePos state)
+  modifyTVar' visState (\s -> s {zoomRatio = newZoomRatio, position = newPos})
 
-  widgetQueueDraw canvas
+  return $ widgetQueueDraw canvas
 
 movePos :: WidgetClass w => w -> (T.Point -> T.Point) -> IO ()
 movePos canvas f = do
@@ -225,8 +226,9 @@ export' :: String -> IO (Maybe String)
 export' filename = case mbDrawFn of
   Right errorMsg -> do putStrLn errorMsg
                        return $ Just errorMsg
-  Left _ -> do put $ ExportSignal ((\(Left x) -> x) mbDrawFn) filename
-               return (Nothing :: Maybe String)
+  Left _ -> atomically $ do
+              put $ ExportSignal ((\(Left x) -> x) mbDrawFn) filename
+              return (Nothing :: Maybe String)
 
   where mbDrawFn = case map toLower (reverse . take 4 . reverse $ filename) of
           ".svg"  -> Left withSVGSurface
@@ -243,8 +245,8 @@ export' filename = case mbDrawFn of
             surfaceWriteToPNG surface filePath
             return ret
 
-put :: Signal -> IO ()
-put s = void $ timeout signalTimeout $ putMVar visSignal s
+put :: Signal -> STM ()
+put = writeTQueue visSignal
 
 mVisMainThread :: IO ()
 mVisMainThread = do
@@ -262,7 +264,7 @@ mVisMainThread = do
 
   on canvas draw $ do
     runCorrect redraw >>= \f -> f canvas
-    runCorrect move >>= \f -> liftIO $ f canvas
+    runCorrect move >>= \f -> liftIO $ join $ atomically $ f canvas
 
   dummy <- windowNew
 
@@ -313,20 +315,21 @@ setupGUI window canvas legendCanvas = do
     liftIO $ traceIO "on canvas motionNotifyEvent"
     (x,y) <- eventCoordinates
     lift $ do
-      state <- readTVarIO visState
-      atomically $ modifyTVar' visState (\s -> s {mousePos = (x,y)})
+      atomically $ do
+        state <- readTVar visState
+        modifyTVar' visState (\s -> s {mousePos = (x,y)})
 
-      if dragging state
-      then do
-        let (oldX, oldY) = mousePos state
-            (deltaX, deltaY) = (x - oldX, y - oldY)
-            (oldPosX, oldPosY) = position state
-        atomically $ modifyTVar' visState (\s -> s {position = (oldPosX + deltaX, oldPosY + deltaY)})
-        widgetQueueDraw canvas
-      else
-        runCorrect move >>= \f -> f canvas
+        if dragging state
+        then do
+          let (oldX, oldY) = mousePos state
+              (deltaX, deltaY) = (x - oldX, y - oldY)
+              (oldPosX, oldPosY) = position state
+          modifyTVar' visState (\s -> s {position = (oldPosX + deltaX, oldPosY + deltaY)})
+          return $ widgetQueueDraw canvas
+        else
+          return $ runCorrect move >>= \f -> liftIO $ join $ atomically $ f canvas
       traceIO "on canvas motionNotifyEvent End"
-      return True
+    return True
 
   on canvas buttonPressEvent $ do
     button <- eventButton
@@ -355,111 +358,114 @@ setupGUI window canvas legendCanvas = do
   on canvas scrollEvent $ do
     direction <- eventScrollDirection
     lift $ do
-      state <- readTVarIO visState
+      traceIO "on canvas scrollEvent"
+      atomically $ do
+        state <- readTVar visState
 
+        when (direction == ScrollUp) $ do
+          let newZoomRatio = zoomRatio state * zoomIncrement
+              newPos = zoomImage canvas state newZoomRatio (mousePos state)
+          modifyTVar' visState (\s -> s {zoomRatio = newZoomRatio, position = newPos})
 
-      when (direction == ScrollUp) $ do
-        let newZoomRatio = zoomRatio state * zoomIncrement
-        newPos <- zoomImage canvas state newZoomRatio (mousePos state)
-        atomically $ modifyTVar' visState (\s -> s {zoomRatio = newZoomRatio, position = newPos})
-
-      when (direction == ScrollDown) $ do
-        let newZoomRatio = zoomRatio state / zoomIncrement
-        newPos <- zoomImage canvas state newZoomRatio (mousePos state)
-        atomically $ modifyTVar' visState (\s -> s {zoomRatio = newZoomRatio, position = newPos})
+        when (direction == ScrollDown) $ do
+          let newZoomRatio = zoomRatio state / zoomIncrement
+              newPos = zoomImage canvas state newZoomRatio (mousePos state)
+          modifyTVar' visState (\s -> s {zoomRatio = newZoomRatio, position = newPos})
 
       widgetQueueDraw canvas
+      traceIO "on canvas scrollEvent End"
       return True
 
   on window keyPressEvent $ do
     eKeyName <- eventKeyName
     lift $ do
-      state <- readTVarIO visState
+      atomically $ do
+        state <- readTVar visState
 
 
-      when (eKeyName `elem` ["plus", "Page_Up", "KP_Add"]) $ do
-        let newZoomRatio = zoomRatio state * zoomIncrement
-            (oldX, oldY) = position state
-            newPos = (oldX*zoomIncrement, oldY*zoomIncrement)
-        atomically $ modifyTVar' visState (\s -> s {zoomRatio = newZoomRatio, position = newPos})
+        when (eKeyName `elem` ["plus", "Page_Up", "KP_Add"]) $ do
+          let newZoomRatio = zoomRatio state * zoomIncrement
+              (oldX, oldY) = position state
+              newPos = (oldX*zoomIncrement, oldY*zoomIncrement)
+          modifyTVar' visState (\s -> s {zoomRatio = newZoomRatio, position = newPos})
 
-      when (eKeyName `elem` ["minus", "Page_Down", "KP_Subtract"]) $ do
-        let newZoomRatio = zoomRatio state / zoomIncrement
-            (oldX, oldY) = position state
-            newPos = (oldX/zoomIncrement, oldY/zoomIncrement)
-        atomically $ modifyTVar' visState (\s -> s {zoomRatio = newZoomRatio, position = newPos})
+        when (eKeyName `elem` ["minus", "Page_Down", "KP_Subtract"]) $ do
+          let newZoomRatio = zoomRatio state / zoomIncrement
+              (oldX, oldY) = position state
+              newPos = (oldX/zoomIncrement, oldY/zoomIncrement)
+          modifyTVar' visState (\s -> s {zoomRatio = newZoomRatio, position = newPos})
 
-      when (eKeyName `elem` ["0", "equal"]) $
-        atomically $ modifyTVar' visState (\s -> s {zoomRatio = 1, position = (0, 0)})
+        when (eKeyName `elem` ["0", "equal"]) $
+          modifyTVar' visState (\s -> s {zoomRatio = 1, position = (0, 0)})
 
-      when (eKeyName `elem` ["Left", "h", "a"]) $
-        atomically $ modifyTVar' visState (\s ->
-          let (x,y) = position s
-              newX  = x + positionIncrement
-          in s {position = (newX, y)})
+        when (eKeyName `elem` ["Left", "h", "a"]) $
+          modifyTVar' visState (\s ->
+            let (x,y) = position s
+                newX  = x + positionIncrement
+            in s {position = (newX, y)})
 
-      when (eKeyName `elem` ["Right", "l", "d"]) $
-        atomically $ modifyTVar' visState (\s ->
-          let (x,y) = position s
-              newX  = x - positionIncrement
-          in s {position = (newX, y)})
+        when (eKeyName `elem` ["Right", "l", "d"]) $
+          modifyTVar' visState (\s ->
+            let (x,y) = position s
+                newX  = x - positionIncrement
+            in s {position = (newX, y)})
 
-      when (eKeyName `elem` ["Up", "k", "w"]) $
-        atomically $ modifyTVar' visState (\s ->
-          let (x,y) = position s
-              newY  = y + positionIncrement
-          in s {position = (x, newY)})
+        when (eKeyName `elem` ["Up", "k", "w"]) $
+          modifyTVar' visState (\s ->
+            let (x,y) = position s
+                newY  = y + positionIncrement
+            in s {position = (x, newY)})
 
-      when (eKeyName `elem` ["Down", "j", "s"]) $
-        atomically $ modifyTVar' visState (\s ->
-          let (x,y) = position s
-              newY  = y - positionIncrement
-          in s {position = (x, newY)})
+        when (eKeyName `elem` ["Down", "j", "s"]) $
+          modifyTVar' visState (\s ->
+            let (x,y) = position s
+                newY  = y - positionIncrement
+            in s {position = (x, newY)})
 
-      when (eKeyName `elem` ["H", "A"]) $
-        atomically $ modifyTVar' visState (\s ->
-          let (x,y) = position s
-              newX  = x + bigPositionIncrement
-          in s {position = (newX, y)})
+        when (eKeyName `elem` ["H", "A"]) $
+          modifyTVar' visState (\s ->
+            let (x,y) = position s
+                newX  = x + bigPositionIncrement
+            in s {position = (newX, y)})
 
-      when (eKeyName `elem` ["L", "D"]) $
-        atomically $ modifyTVar' visState (\s ->
-          let (x,y) = position s
-              newX  = x - bigPositionIncrement
-          in s {position = (newX, y)})
+        when (eKeyName `elem` ["L", "D"]) $
+          modifyTVar' visState (\s ->
+            let (x,y) = position s
+                newX  = x - bigPositionIncrement
+            in s {position = (newX, y)})
 
-      when (eKeyName `elem` ["K", "W"]) $
-        atomically $ modifyTVar' visState (\s ->
-          let (x,y) = position s
-              newY  = y + bigPositionIncrement
-          in s {position = (x, newY)})
+        when (eKeyName `elem` ["K", "W"]) $
+          modifyTVar' visState (\s ->
+            let (x,y) = position s
+                newY  = y + bigPositionIncrement
+            in s {position = (x, newY)})
 
-      when (eKeyName `elem` ["J", "S"]) $
-        atomically $ modifyTVar' visState (\s ->
-          let (x,y) = position s
-              newY  = y - bigPositionIncrement
-          in s {position = (x, newY)})
+        when (eKeyName `elem` ["J", "S"]) $
+          modifyTVar' visState (\s ->
+            let (x,y) = position s
+                newY  = y - bigPositionIncrement
+            in s {position = (x, newY)})
+
+        when (eKeyName == "v") $
+          put SwitchSignal
+
+        when (eKeyName == "c") $
+          put ClearSignal
+
+        when (eKeyName == "C") $
+          put RestoreSignal
+
+        when (eKeyName == "u") $
+          put UpdateSignal
+
+        when (eKeyName `elem` ["comma", "bracketleft"]) $
+          put $ HistorySignal (+1)
+
+        when (eKeyName `elem` ["period", "bracketright"]) $
+          put $ HistorySignal (\x -> x - 1)
 
       when (eKeyName `elem` ["space", "Return", "KP_Enter"]) $
         join $ runCorrect click
-
-      when (eKeyName `elem` ["v"]) $
-        put SwitchSignal
-
-      when (eKeyName `elem` ["c"]) $
-        put ClearSignal
-
-      when (eKeyName `elem` ["C"]) $
-        put RestoreSignal
-
-      when (eKeyName `elem` ["u"]) $
-        put UpdateSignal
-
-      when (eKeyName `elem` ["comma", "bracketleft"]) $
-        put $ HistorySignal (+1)
-
-      when (eKeyName `elem` ["period", "bracketright"]) $
-        put $ HistorySignal (\x -> x - 1)
 
       widgetQueueDraw canvas
       return True
@@ -540,14 +546,14 @@ react canvas legendCanvas = do
   -- Reloads cause the visSignal to be reinitialized, but takeMVar is still
   -- waiting for the old one.  This solution is not perfect, but it works for
   -- now.
-  mbSignal <- timeout signalTimeout (takeMVar visSignal)
+  mbSignal <- timeout signalTimeout (atomically $ readTQueue visSignal)
   case mbSignal of
     Nothing -> do
       running <- readMVar visRunning
       if running then react canvas legendCanvas else
         -- :r caused visRunning to be reset
         (do swapMVar visRunning True
-            timeout signalTimeout (putMVar visSignal UpdateSignal)
+            timeout signalTimeout $ atomically $ writeTQueue visSignal UpdateSignal
             react canvas legendCanvas)
     Just signal -> do
       doUpdate <- case signal of
@@ -557,7 +563,7 @@ react canvas legendCanvas = do
         ClearSignal    -> do
           modifyMVar_ visBoxes $ const $ return []
           modifyMVar_ visHidden $ const $ return []
-          modifyMVar_ visHeapHistory $ const $ return (0, [(HeapGraph M.empty, [])])
+          atomically $ modifyTVar' visHeapHistory $ const (0, [(HeapGraph M.empty, [])])
           return False
         RestoreSignal -> do
           modifyMVar_ visHidden $ const $ return []
@@ -566,7 +572,7 @@ react canvas legendCanvas = do
         UpdateSignal   -> return True
         SwitchSignal   -> doSwitch >> return False
         HistorySignal f -> do
-          modifyMVar_ visHeapHistory (\(i,xs) -> return (max 0 (min (length xs - 1) (f i)), xs))
+          atomically $ modifyTVar'  visHeapHistory (\(i,xs) -> (max 0 (min (length xs - 1) (f i)), xs))
           return False
         ExportSignal d f -> do
           catch (runCorrect (exportView :: View -> (forall a. FilePath -> Double -> Double -> (Surface -> IO a) -> IO a) -> String -> IO ()) >>= \e -> e d f)
@@ -589,7 +595,7 @@ react canvas legendCanvas = do
 
         s <- readTVarIO visState
         x <- multiBuildHeapGraph (heapDepth s) boxes
-        modifyMVar_ visHeapHistory (\(i,xs) -> return (i,x:xs))
+        atomically $ modifyTVar' visHeapHistory (second ((:) x))
 
       runCorrect updateObjects >>= \f -> f boxes
 
@@ -613,13 +619,12 @@ runCorrect f = do
   s <- liftIO $ readTVarIO visState
   return $ f $ views !! fromEnum (T.view s)
 
-zoomImage :: WidgetClass w1 => w1 -> State -> Double -> T.Point -> IO T.Point
-zoomImage _canvas s newZoomRatio _mousePos@(_x', _y') = do
+zoomImage :: WidgetClass w1 => w1 -> State -> Double -> T.Point -> T.Point
+zoomImage _canvas s newZoomRatio _mousePos@(_x', _y') =
   let (oldPosX, oldPosY) = position s
       newZoom = newZoomRatio / zoomRatio s
       newPos = (oldPosX * newZoom, oldPosY * newZoom)
-
-  return newPos
+  in newPos
 
 #ifdef FULL_WINDOW
 visMainThread :: IO ()
@@ -667,19 +672,19 @@ visMainThread = do
         spinButtonSetValue depthSpin $ fromIntegral $ heapDepth s
 
 
-  getO castToMenuItem "clear"       >>= \item -> on item menuItemActivated clear
-  getO castToMenuItem "switch"      >>= \item -> on item menuItemActivated switch
-  getO castToMenuItem "restore"     >>= \item -> on item menuItemActivated restore
-  getO castToMenuItem "update"      >>= \item -> on item menuItemActivated update
+  getO castToMenuItem "clear"       >>= \item -> on item menuItemActivated $ atomically clear
+  getO castToMenuItem "switch"      >>= \item -> on item menuItemActivated $ atomically switch
+  getO castToMenuItem "restore"     >>= \item -> on item menuItemActivated $ atomically restore
+  getO castToMenuItem "update"      >>= \item -> on item menuItemActivated $ atomically update
   getO castToMenuItem "setdepth"    >>= \item -> on item menuItemActivated $ setDepthSpin >> widgetShow depthDialog
   getO castToMenuItem "export"      >>= \item -> on item menuItemActivated $ widgetShow saveDialog
   getO castToMenuItem "quit"        >>= \item -> on item menuItemActivated $ widgetDestroy window
   getO castToMenuItem "about"       >>= \item -> on item menuItemActivated $ widgetShow aboutDialog
   getO castToMenuItem "legend"      >>= \item -> on item menuItemActivated $ widgetShow legendDialog
-  getO castToMenuItem "timeback"    >>= \item -> on item menuItemActivated $ history (+1)
-  getO castToMenuItem "timeforward" >>= \item -> on item menuItemActivated $ history (\x -> x - 1)
-  getO castToMenuItem "zoomin"      >>= \item -> on item menuItemActivated $ zoom canvas (*1.25)
-  getO castToMenuItem "zoomout"     >>= \item -> on item menuItemActivated $ zoom canvas (/1.25)
+  getO castToMenuItem "timeback"    >>= \item -> on item menuItemActivated $ atomically $ history (+1)
+  getO castToMenuItem "timeforward" >>= \item -> on item menuItemActivated $ atomically $ history (\x -> x - 1)
+  getO castToMenuItem "zoomin"      >>= \item -> on item menuItemActivated $ join $ atomically $ zoom canvas (*1.25)
+  getO castToMenuItem "zoomout"     >>= \item -> on item menuItemActivated $ join $ atomically $ zoom canvas (/1.25)
   getO castToMenuItem "left"        >>= \item -> on item menuItemActivated $ movePos canvas (\(x,y) -> (x + positionIncrement, y))
   getO castToMenuItem "right"       >>= \item -> on item menuItemActivated $ movePos canvas (\(x,y) -> (x - positionIncrement, y))
   getO castToMenuItem "up"          >>= \item -> on item menuItemActivated $ movePos canvas (\(x,y) -> (x, y + positionIncrement))
@@ -700,7 +705,7 @@ visMainThread = do
     then renderSVGScaled canvas welcomeSVG
     else do
       runCorrect redraw >>= \f -> f canvas
-      runCorrect move >>= \f -> liftIO $ f canvas
+      runCorrect move >>= \f -> liftIO $ atomically $ f canvas
       return ()
 
   on legendCanvas draw $ do
@@ -730,7 +735,7 @@ setDepthDialog :: Dialog -> SpinButton -> ResponseId -> IO ()
 setDepthDialog depthDialog depthSpin responseId = do
   case responseId of
     ResponseOk -> do depth <- spinButtonGetValue depthSpin
-                     setDepth $ round depth
+                     atomically $ setDepth $ round depth
     _ -> return ()
   widgetHide depthDialog
 

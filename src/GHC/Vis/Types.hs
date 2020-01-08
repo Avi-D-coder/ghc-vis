@@ -23,6 +23,7 @@ module GHC.Vis.Types (
 
 import GHC.HeapView
 
+import Control.Concurrent.STM
 import qualified Control.Monad.State.Strict as MS
 
 import Graphics.UI.Gtk hiding (Box, Signal, Point)
@@ -48,7 +49,7 @@ data Signal = NewSignal Box String -- ^ Add a new Box to be visualized
 data View = View
   { redraw        :: forall w. WidgetClass w => w -> Render ()
   , click         :: IO ()
-  , move          :: forall w. WidgetClass w => w -> IO ()
+  , move          :: forall w. WidgetClass w => w -> STM (IO ())
   , updateObjects :: [NamedBox] -> IO ()
   , exportView    :: DrawFunction -> String -> IO ()
   }

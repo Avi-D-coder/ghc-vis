@@ -172,9 +172,11 @@ drawHoverMenu x = do
 --   that causes the object to be evaluated and the screen to be updated.
 click :: IO ()
 click = do
-  s <- readTVarIO state
+  (s, hm) <- atomically $ do
+    s <- readTVar state
+    hm <- inHistoryMode
+    return (s, hm)
 
-  hm <- inHistoryMode
   unless hm $ case iconHover s of
     Nothing -> case hover s of
       -- This might fail when a click occurs during an update
@@ -192,14 +194,12 @@ click = do
 evaluateClick :: State -> Int -> IO ()
 evaluateClick s t = unless (length (boxes s) <= t) $ do
   evaluate2 $ boxes s !! t
-  -- Without forkIO it would hang indefinitely if some action is currently
-  -- executed
-  void $ forkIO $ putMVar visSignal UpdateSignal
+  atomically $ writeTQueue visSignal UpdateSignal
 
 collapseClick :: State -> Int -> IO ()
 collapseClick s t = unless (length (boxes s) <= t) $ do
   hide $ boxes s !! t
-  void $ forkIO $ putMVar visSignal RedrawSignal
+  atomically $ writeTQueue visSignal UpdateSignal
 
 evaluate2 :: Box -> IO ()
 evaluate2 b@(Box a) = do
@@ -228,10 +228,10 @@ hide b = modifyMVar_ visHidden (\hs -> return $ b : hs)
 -- | Handle a mouse move. Causes an 'UpdateSignal' if the mouse is hovering a
 --   different object now, so the object gets highlighted and the screen
 --   updated.
-move :: WidgetClass w => w -> IO ()
+move :: WidgetClass w => w -> STM (IO ())
 move canvas = do
-  vs <- readTVarIO visState
-  oldS <- readTVarIO state
+  vs <- readTVar visState
+  oldS <- readTVar state
   let oldHover = hover oldS
 
       (mx, my) = mousePos vs
@@ -261,20 +261,20 @@ move canvas = do
   case iconHov of
     Just i -> do
       let ih = Just (oldHover, i)
-      atomically $ modifyTVar' state $ \s' -> s' {iconHover = ih}
-      unless (iconHover oldS == ih) $ widgetQueueDraw canvas
+      modifyTVar' state $ \s' -> s' {iconHover = ih}
+      return $ unless (iconHover oldS == ih) $ widgetQueueDraw canvas
 
     Nothing -> do
       let h = validOne $ map check' $ bounds oldS
-      atomically $ modifyTVar' state $ \s' -> s' {hover = h, iconHover = Nothing}
-      unless (oldHover == h && iconHover oldS == Nothing) $ widgetQueueDraw canvas
+      modifyTVar' state $ \s' -> s' {hover = h, iconHover = Nothing}
+      return $ unless (oldHover == h && isNothing (iconHover oldS)) $ widgetQueueDraw canvas
 
 -- | Something might have changed on the heap, update the view.
 updateObjects :: [NamedBox] -> IO ()
 updateObjects _boxes = do
   traceIO "updateObjects"
   hidden <- readMVar visHidden
-  (ops, bs', _ , size) <- xDotParse $ hidden
+  (ops, bs', _ , size) <- xDotParse hidden
 
   atomically $ modifyTVar' state (\s -> s {operations = ops, boxes = bs', totalSize = size, hover = None})
   traceIO "updateObjects End"

@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, ScopedTypeVariables, RecordWildCards #-}
+{-# LANGUAGE CPP, ScopedTypeVariables #-}
 {- |
    Module      : GHC.Vis.View.Common
    Copyright   : (c) Dennis Felsing
@@ -45,9 +45,9 @@ import GHC.Vis.Types
 import GHC.HeapView
 
 -- | Communication channel to the visualization
-visSignal :: MVar Signal
+visSignal :: TQueue Signal
 {-# NOINLINE visSignal #-}
-visSignal = unsafePerformIO (newEmptyMVar :: IO (MVar Signal))
+visSignal = unsafePerformIO newTQueueIO
 
 -- | Whether a visualization is currently running
 visRunning :: MVar Bool
@@ -80,51 +80,51 @@ visHidden :: MVar [Box]
 visHidden = unsafePerformIO (newMVar [] :: IO (MVar [Box]))
 
 -- | All heap graphs since the last clear command
-visHeapHistory :: MVar (Int, [(HeapGraph Identifier, [(Identifier, HeapGraphIndex)])])
+visHeapHistory :: TVar (Int, [(HeapGraph Identifier, [(Identifier, HeapGraphIndex)])])
 {-# NOINLINE visHeapHistory #-}
-visHeapHistory = unsafePerformIO (newMVar (0, [(HeapGraph M.empty, [])]) :: IO (MVar (Int, [(HeapGraph Identifier, [(Identifier, HeapGraphIndex)])])))
+visHeapHistory = unsafePerformIO $ newTVarIO (0, [(HeapGraph M.empty, [])])
 
 -- | Get the currently selected heap graph
-getHeapGraph :: IO (HeapGraph Identifier, [(Identifier, HeapGraphIndex)])
+getHeapGraph :: STM (HeapGraph Identifier, [(Identifier, HeapGraphIndex)])
 getHeapGraph = do
-  (pos, xs) <- readMVar visHeapHistory
+  (pos, xs) <- readTVar visHeapHistory
   return $ xs !! pos
 
 -- | Whether we're currently looking at an older heap graph or the most recent one
-inHistoryMode :: IO Bool
-inHistoryMode = liftM ((> 0) . fst) $ readMVar visHeapHistory
+inHistoryMode :: STM Bool
+inHistoryMode = (> 0) . fst <$> readTVar visHeapHistory
 
 -- | Evaluate an object identified by a String.
-evaluate :: String -> IO ()
+evaluate :: String -> STM ()
 evaluate identifier = do (_,HeapGraph m) <- printAll
-                         (show (M.map go m) `deepseq` return ()) `catch`
-                           \(e :: SomeException) -> putStrLn $ "Caught exception while evaluating: " ++ show e
+                         (show (M.map go m) `deepseq` return ()) `catchSTM`
+                           \(e :: SomeException) -> return $ unsafePerformIO (putStrLn $ "Caught exception while evaluating: " ++ show e)
   where go hge@(HeapGraphEntry (Box a) _ _ n) | n == identifier = seq a hge
                                               | otherwise = hge
 
 -- | Walk the heap for a list of objects to be visualized and their
 --   corresponding names.
-parseBoxes :: IO [[VisObject]]
+parseBoxes :: STM [[VisObject]]
 parseBoxes = generalParseBoxes evalState
 
 -- | Walk the heap for a list of objects to be visualized and their
 --   corresponding names. Also return the resulting 'HeapMap' and another
 --   'HeapMap' that does not contain BCO pointers.
-parseBoxesHeap :: IO ([[VisObject]], PState)
+parseBoxesHeap :: STM ([[VisObject]], PState)
 parseBoxesHeap = generalParseBoxes runState
 
 --generalParseBoxes ::
 --     (PrintState (Maybe [[VisObject]]) -> PState -> b)
 --  -> [NamedBox] -> IO b
-generalParseBoxes :: (PrintState [[VisObject]] -> PState -> b) -> IO b
+generalParseBoxes :: (PrintState [[VisObject]] -> PState -> b) -> STM b
 generalParseBoxes f = do
   --(hg, starts) <- multiBuildHeapGraph 100 $ map (\(_,x) -> ("",x)) bs
   (hg@(HeapGraph m), starts) <- getHeapGraph
-  let bindings = boundMultipleTimes hg $ map snd starts
+  let bindings' = boundMultipleTimes hg $ map snd starts
   let g i = do
         r <- parseClosure i
         return $ simplify r
-  return $ f (mapM (g . snd) starts) $ PState 1 1 1 bindings $ HeapGraph $ M.map (\hge -> hge{hgeData = ""}) m
+  return $ f (mapM (g . snd) starts) $ PState 1 1 1 bindings' $ HeapGraph $ M.map (\hge -> hge{hgeData = ""}) m
 
 -- | In the given HeapMap, list all indices that are used more than once. The
 -- second parameter adds external references, commonly @[heapGraphRoot]@.
@@ -141,7 +141,7 @@ simplify (Unnamed a : Unnamed b : xs) = simplify $ Unnamed (a ++ b) : xs
 simplify (Named a bs : xs) = Named a (simplify bs) : simplify xs
 simplify (a:xs) = a : simplify xs
 
-printAll :: IO (String, HeapGraph String)
+printAll :: STM (String, HeapGraph String)
 printAll = do
   (t, PState{heapGraph = h}) <- parseBoxesHeap
   return (show t, h)

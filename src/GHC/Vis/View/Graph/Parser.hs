@@ -30,6 +30,7 @@ import GHC.HeapView hiding (name)
 import GHC.Vis.Internal (showClosureFields)
 import GHC.Vis.Types
 import GHC.Vis.View.Common
+import GHC.Conc
 
 import Graphics.XDot.Types hiding (name, h, Style, Color)
 import Graphics.XDot.Parser
@@ -118,8 +119,8 @@ removeOld _ x = x
 xDotParse :: [Box] -> IO ([(Object Node, Operation)], [Box], [(Object Node, Rectangle)], Rectangle)
 xDotParse hidden = do
   --(hg, _) <- multiBuildHeapGraph 100 as
-  (HeapGraph hg'', _) <- getHeapGraph
-  let hg' = M.filter (\(HeapGraphEntry b _ _ _) -> not $ b `elem` hidden) hg''
+  (HeapGraph hg'', _) <- atomically getHeapGraph
+  let hg' = M.filter (\(HeapGraphEntry b _ _ _) -> b `notElem` hidden) hg''
   let hg = HeapGraph $ M.map (\hge -> hge{hgeClosure = fmap (removeOld $ M.keys hg') (hgeClosure hge)}) hg'
   --let hg = HeapGraph $ traverse removeOld hg'
 
