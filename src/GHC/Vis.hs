@@ -61,6 +61,7 @@ import Graphics.UI.Gtk hiding (Box, Signal)
 
 import System.IO
 import Control.Concurrent
+import Control.Concurrent.STM
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Class
@@ -68,7 +69,6 @@ import Control.Monad.Trans.Class
 import Control.Exception hiding (evaluate)
 
 import Data.Char
-import Data.IORef
 import Data.Version
 
 import Data.Text ()
@@ -196,22 +196,22 @@ history = put . HistorySignal
 -- | Set the maximum depth for following closures on the heap
 setDepth :: Int -> IO ()
 setDepth newDepth
-  | newDepth > 0 = modifyIORef visState (\s -> s {heapDepth = newDepth})
+  | newDepth > 0 = atomically $ modifyTVar' visState (\s -> s {heapDepth = newDepth})
   | otherwise    = error "Heap depth has to be positive"
 
 zoom :: WidgetClass w => w -> (Double -> Double) -> IO ()
 zoom canvas f = do
-  state <- readIORef visState
+  state <- readTVarIO visState
 
   let newZoomRatio = f $ zoomRatio state
   newPos <- zoomImage canvas state newZoomRatio (mousePos state)
-  modifyIORef visState (\s -> s {zoomRatio = newZoomRatio, position = newPos})
+  atomically $ modifyTVar' visState (\s -> s {zoomRatio = newZoomRatio, position = newPos})
 
   widgetQueueDraw canvas
 
 movePos :: WidgetClass w => w -> (T.Point -> T.Point) -> IO ()
 movePos canvas f = do
-  modifyIORef visState (\s ->
+  atomically $ modifyTVar' visState (\s ->
     let newPosition = f $ position s
     in s {position = newPosition})
   widgetQueueDraw canvas
@@ -313,15 +313,15 @@ setupGUI window canvas legendCanvas = do
     liftIO $ traceIO "on canvas motionNotifyEvent"
     (x,y) <- eventCoordinates
     lift $ do
-      state <- readIORef visState
-      modifyIORef visState (\s -> s {mousePos = (x,y)})
+      state <- readTVarIO visState
+      atomically $ modifyTVar' visState (\s -> s {mousePos = (x,y)})
 
       if dragging state
       then do
         let (oldX, oldY) = mousePos state
             (deltaX, deltaY) = (x - oldX, y - oldY)
             (oldPosX, oldPosY) = position state
-        modifyIORef visState (\s -> s {position = (oldPosX + deltaX, oldPosY + deltaY)})
+        atomically $ modifyTVar' visState (\s -> s {position = (oldPosX + deltaX, oldPosY + deltaY)})
         widgetQueueDraw canvas
       else
         runCorrect move >>= \f -> f canvas
@@ -336,10 +336,10 @@ setupGUI window canvas legendCanvas = do
         join $ runCorrect click
 
       when (button == RightButton && eClick == SingleClick) $
-        modifyIORef visState (\s -> s {dragging = True})
+        atomically $ modifyTVar' visState (\s -> s {dragging = True})
 
       when (button == MiddleButton && eClick == SingleClick) $ do
-        modifyIORef visState (\s -> s {zoomRatio = 1, position = (0, 0)})
+        atomically $ modifyTVar' visState (\s -> s {zoomRatio = 1, position = (0, 0)})
         widgetQueueDraw canvas
 
     return True
@@ -348,25 +348,25 @@ setupGUI window canvas legendCanvas = do
     button <- eventButton
     lift $ do
       when (button == RightButton) $
-        modifyIORef visState (\s -> s {dragging = False})
+        atomically $ modifyTVar' visState (\s -> s {dragging = False})
 
       return True
 
   on canvas scrollEvent $ do
     direction <- eventScrollDirection
     lift $ do
-      state <- readIORef visState
+      state <- readTVarIO visState
 
 
       when (direction == ScrollUp) $ do
         let newZoomRatio = zoomRatio state * zoomIncrement
         newPos <- zoomImage canvas state newZoomRatio (mousePos state)
-        modifyIORef visState (\s -> s {zoomRatio = newZoomRatio, position = newPos})
+        atomically $ modifyTVar' visState (\s -> s {zoomRatio = newZoomRatio, position = newPos})
 
       when (direction == ScrollDown) $ do
         let newZoomRatio = zoomRatio state / zoomIncrement
         newPos <- zoomImage canvas state newZoomRatio (mousePos state)
-        modifyIORef visState (\s -> s {zoomRatio = newZoomRatio, position = newPos})
+        atomically $ modifyTVar' visState (\s -> s {zoomRatio = newZoomRatio, position = newPos})
 
       widgetQueueDraw canvas
       return True
@@ -374,68 +374,68 @@ setupGUI window canvas legendCanvas = do
   on window keyPressEvent $ do
     eKeyName <- eventKeyName
     lift $ do
-      state <- readIORef visState
+      state <- readTVarIO visState
 
 
       when (eKeyName `elem` ["plus", "Page_Up", "KP_Add"]) $ do
         let newZoomRatio = zoomRatio state * zoomIncrement
             (oldX, oldY) = position state
             newPos = (oldX*zoomIncrement, oldY*zoomIncrement)
-        modifyIORef visState (\s -> s {zoomRatio = newZoomRatio, position = newPos})
+        atomically $ modifyTVar' visState (\s -> s {zoomRatio = newZoomRatio, position = newPos})
 
       when (eKeyName `elem` ["minus", "Page_Down", "KP_Subtract"]) $ do
         let newZoomRatio = zoomRatio state / zoomIncrement
             (oldX, oldY) = position state
             newPos = (oldX/zoomIncrement, oldY/zoomIncrement)
-        modifyIORef visState (\s -> s {zoomRatio = newZoomRatio, position = newPos})
+        atomically $ modifyTVar' visState (\s -> s {zoomRatio = newZoomRatio, position = newPos})
 
       when (eKeyName `elem` ["0", "equal"]) $
-        modifyIORef visState (\s -> s {zoomRatio = 1, position = (0, 0)})
+        atomically $ modifyTVar' visState (\s -> s {zoomRatio = 1, position = (0, 0)})
 
       when (eKeyName `elem` ["Left", "h", "a"]) $
-        modifyIORef visState (\s ->
+        atomically $ modifyTVar' visState (\s ->
           let (x,y) = position s
               newX  = x + positionIncrement
           in s {position = (newX, y)})
 
       when (eKeyName `elem` ["Right", "l", "d"]) $
-        modifyIORef visState (\s ->
+        atomically $ modifyTVar' visState (\s ->
           let (x,y) = position s
               newX  = x - positionIncrement
           in s {position = (newX, y)})
 
       when (eKeyName `elem` ["Up", "k", "w"]) $
-        modifyIORef visState (\s ->
+        atomically $ modifyTVar' visState (\s ->
           let (x,y) = position s
               newY  = y + positionIncrement
           in s {position = (x, newY)})
 
       when (eKeyName `elem` ["Down", "j", "s"]) $
-        modifyIORef visState (\s ->
+        atomically $ modifyTVar' visState (\s ->
           let (x,y) = position s
               newY  = y - positionIncrement
           in s {position = (x, newY)})
 
       when (eKeyName `elem` ["H", "A"]) $
-        modifyIORef visState (\s ->
+        atomically $ modifyTVar' visState (\s ->
           let (x,y) = position s
               newX  = x + bigPositionIncrement
           in s {position = (newX, y)})
 
       when (eKeyName `elem` ["L", "D"]) $
-        modifyIORef visState (\s ->
+        atomically $ modifyTVar' visState (\s ->
           let (x,y) = position s
               newX  = x - bigPositionIncrement
           in s {position = (newX, y)})
 
       when (eKeyName `elem` ["K", "W"]) $
-        modifyIORef visState (\s ->
+        atomically $ modifyTVar' visState (\s ->
           let (x,y) = position s
               newY  = y + bigPositionIncrement
           in s {position = (x, newY)})
 
       when (eKeyName `elem` ["J", "S"]) $
-        modifyIORef visState (\s ->
+        atomically $ modifyTVar' visState (\s ->
           let (x,y) = position s
               newY  = y - bigPositionIncrement
           in s {position = (x, newY)})
@@ -524,7 +524,7 @@ react2 = do
 
 #ifdef GRAPH_VIEW
   where doSwitch = isGraphvizInstalled >>= \gvi -> if gvi
-          then modifyIORef visState (\s -> s {T.view = succN (T.view s), zoomRatio = 1, position = (0, 0)})
+          then atomically $ modifyTVar' visState (\s -> s {T.view = succN (T.view s), zoomRatio = 1, position = (0, 0)})
           else putStrLn "Cannot switch view: The Graphviz binary (dot) is not installed"
 
         succN GraphView = ListView
@@ -587,7 +587,7 @@ react canvas legendCanvas = do
                   -- λ> let x = 17 :: Int
                   -- λ> let ys = [ y | y <- xs, y >= x ]
 
-        s <- readIORef visState
+        s <- readTVarIO visState
         x <- multiBuildHeapGraph (heapDepth s) boxes
         modifyMVar_ visHeapHistory (\(i,xs) -> return (i,x:xs))
 
@@ -599,7 +599,7 @@ react canvas legendCanvas = do
 
 #ifdef GRAPH_VIEW
   where doSwitch = isGraphvizInstalled >>= \gvi -> if gvi
-          then modifyIORef visState (\s -> s {T.view = succN (T.view s), zoomRatio = 1, position = (0, 0)})
+          then atomically $ modifyTVar' visState (\s -> s {T.view = succN (T.view s), zoomRatio = 1, position = (0, 0)})
           else putStrLn "Cannot switch view: The Graphviz binary (dot) is not installed"
 
         succN GraphView = ListView
@@ -610,7 +610,7 @@ react canvas legendCanvas = do
 
 runCorrect :: MonadIO m => (View -> f) -> m f
 runCorrect f = do
-  s <- liftIO $ readIORef visState
+  s <- liftIO $ readTVarIO visState
   return $ f $ views !! fromEnum (T.view s)
 
 zoomImage :: WidgetClass w1 => w1 -> State -> Double -> T.Point -> IO T.Point
@@ -663,7 +663,7 @@ visMainThread = do
   on legendDialog deleteEvent $ lift $ widgetHide legendDialog >> return True
 
   let setDepthSpin = do
-        s <- readIORef visState
+        s <- readTVarIO visState
         spinButtonSetValue depthSpin $ fromIntegral $ heapDepth s
 
 
@@ -704,7 +704,7 @@ visMainThread = do
       return ()
 
   on legendCanvas draw $ do
-    state <- liftIO $ readIORef visState
+    state <- liftIO $ readTVarIO visState
     renderSVGScaled legendCanvas $ case T.view state of
       ListView  -> legendListSVG
       GraphView -> legendGraphSVG

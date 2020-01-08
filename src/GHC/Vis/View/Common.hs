@@ -33,7 +33,7 @@ import Control.Monad.State.Strict hiding (State, fix)
 
 import qualified Data.IntMap as M
 
-import Data.IORef
+import Control.Concurrent.STM
 
 import Data.Maybe (catMaybes)
 import Data.List
@@ -65,9 +65,9 @@ defaultView = ListView
 #endif
 
 -- | Internal state of the visualization
-visState :: IORef State
+visState :: TVar State
 {-# NOINLINE visState #-}
-visState = unsafePerformIO $ newIORef $ State (0, 0) defaultView 1 (0, 0) False False defaultDepth
+visState = unsafePerformIO $ newTVarIO $ State (0, 0) defaultView 1 (0, 0) False False defaultDepth
 
 -- | All the visualized boxes
 visBoxes :: MVar [NamedBox]

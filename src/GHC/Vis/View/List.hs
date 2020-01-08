@@ -31,9 +31,9 @@ import qualified Graphics.UI.Gtk as Gtk
 import Graphics.Rendering.Cairo hiding (width, height, x, y)
 
 import Control.Concurrent
+import Control.Concurrent.STM
 import Control.Monad
 
-import Data.IORef
 import Data.List
 import System.IO.Unsafe
 
@@ -53,13 +53,13 @@ data State = State
 
 type RGB = (Double, Double, Double)
 
-state :: IORef State
+state :: TVar State
 {-# NOINLINE state #-}
-state = unsafePerformIO $ newIORef $ State [] [] Nothing (0, 0, 1, 1)
+state = unsafePerformIO $ newTVarIO $ State [] [] Nothing (0, 0, 1, 1)
 
-layout' :: IORef (Maybe PangoLayout)
+layout' :: TVar (Maybe PangoLayout)
 {-# NOINLINE layout' #-}
-layout' = unsafePerformIO $ newIORef Nothing
+layout' = unsafePerformIO $ newTVarIO Nothing
 
 fontName :: String
 fontName = "Sans"
@@ -101,26 +101,26 @@ padding = 5
 --   requested from outside the program.
 redraw :: WidgetClass w => w -> Render ()
 redraw canvas = do
-  s <- liftIO $ readIORef state
+  s <- liftIO $ readTVarIO state
   rw2 <- liftIO $ Gtk.widgetGetAllocatedWidth canvas
   rh2 <- liftIO $ Gtk.widgetGetAllocatedHeight canvas
 
   (size, boundingBoxes) <- draw s rw2 rh2
-  liftIO $ modifyIORef state (\s' -> s' {totalSize = size, bounds = boundingBoxes})
+  liftIO $ atomically $ modifyTVar' state (\s' -> s' {totalSize = size, bounds = boundingBoxes})
 
 #ifdef SDL_WINDOW
 getState :: IO State
-getState = readIORef state
+getState = readTVarIO state
 
 updateBoundingBoxes :: [(String, Rectangle)] -> IO ()
 updateBoundingBoxes boundingBoxes = do
-  modifyIORef state (\s' -> s' {bounds = boundingBoxes})
+  atomically $ modifyTVar' state (\s' -> s' {bounds = boundingBoxes})
 #endif
 
 -- | Export the visualization to an SVG file
 export :: DrawFunction -> String -> IO ()
 export drawFn file = do
-  s <- readIORef state
+  s <- readTVarIO state
 
   let (_, _, xSize, ySize) = totalSize s
 
@@ -137,13 +137,13 @@ draw s rw2 rh2 = do
       names = map ((++ ": ") . (\(_,x,_) -> x)) os
 
   layout <- pangoEmptyLayout
-  liftIO $ writeIORef layout' $ Just layout
+  liftIO $ atomically $ writeTVar layout' $ Just layout
 
   nameWidths <- mapM (width . Unnamed) names
   pos <- mapM height objs
   widths <- mapM (mapM width) objs
 
-  vS <- liftIO $ readIORef visState
+  vS <- liftIO $ readTVarIO visState
 
   let rw = 0.98 * fromIntegral rw2
       rh = fromIntegral rh2
@@ -171,7 +171,7 @@ draw s rw2 rh2 = do
 --   that causes the object to be evaluated and the screen to be updated.
 click :: IO ()
 click = do
-  s <- readIORef state
+  s <- readTVarIO state
 
   hm <- inHistoryMode
   unless hm $ case hover s of
@@ -187,18 +187,18 @@ click = do
 --   updated.
 move :: WidgetClass w => w -> IO ()
 move canvas = do
-  vS <- readIORef visState
-  oldS <- readIORef state
+  vS <- readTVarIO visState
+  oldS <- readTVarIO state
   let oldHover = hover oldS
 
-  modifyIORef state $ \s' ->
+  atomically $ modifyTVar' state $ \s' ->
     let (mx, my) = mousePos vS
-        check (o, (x,y,w,h)) =
+        check' (o, (x,y,w,h)) =
           if x <= mx && mx <= x + w &&
              y <= my && my <= y + h
           then Just o else Nothing
-    in s' {hover = msum $ map check (bounds s')}
-  s <- readIORef state
+    in s' {hover = msum $ map check' (bounds s')}
+  s <- readTVarIO state
   unless (oldHover == hover s) $ widgetQueueDraw canvas
 
 -- | Something might have changed on the heap, update the view.
@@ -209,7 +209,7 @@ updateObjects boxes = do
   -- This is wrong
   --let os = visHeapGraph (zipWith (\(b,i) (b',n) -> (i,n)) is boxes) h
   let objs = zipWith (\(y,x) z -> (x,intercalate ", " y,z)) boxes os
-  modifyIORef state (\s -> s {objects = objs, hover = Nothing})
+  atomically $ modifyTVar' state (\s -> s {objects = objs, hover = Nothing})
 
 drawEntry :: State -> Double -> Double -> ([VisObject], Double, String) -> Render [(String, Rectangle)]
 drawEntry s nameWidth xPos (obj, pos, name) = do
@@ -289,11 +289,11 @@ drawBox s o@(Named name content) = do
 pangoLayout :: String -> Render (PangoLayout, FontMetrics)
 pangoLayout text = do
   --layout <- createLayout text
-  mbLayout <- liftIO $ readIORef layout'
+  mbLayout <- liftIO $ readTVarIO layout'
   layout'' <- case mbLayout of
                 Just layout''' -> return layout'''
                 Nothing -> do layout''' <- pangoEmptyLayout
-                              liftIO $ writeIORef layout' $ Just layout'''
+                              liftIO $ atomically $ writeTVar layout' $ Just layout'''
                               return layout'''
 
   layout <- liftIO $ layoutCopy layout''

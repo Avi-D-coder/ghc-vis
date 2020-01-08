@@ -24,11 +24,11 @@ import qualified Graphics.UI.Gtk as Gtk
 import Graphics.Rendering.Cairo hiding (x, y)
 
 import Control.Concurrent
+import Control.Concurrent.STM
 import Control.Monad
 import Control.Exception
 
 import Data.Maybe
-import Data.IORef
 import System.IO.Unsafe
 
 import GHC.Vis.View.Graph.Parser
@@ -67,9 +67,9 @@ data State = State
   , iconHover  :: Maybe (Object Int, Icon)
   }
 
-state :: IORef State
+state :: TVar State
 {-# NOINLINE state #-}
-state = unsafePerformIO $ newIORef $ State [] [] (0, 0, 1, 1) [] [] None Nothing
+state = unsafePerformIO $ newTVarIO $ State [] [] (0, 0, 1, 1) [] [] None Nothing
 
 iconEvaluateSVG :: SVG
 {-# NOINLINE iconEvaluateSVG #-}
@@ -89,19 +89,19 @@ hoverCollapseSVG = unsafePerformIO $ My.getDataFileName "data/hover_collapse.svg
 redraw :: WidgetClass w => w -> Render ()
 redraw canvas = do
   liftIO $ traceIO "redraw"
-  s <- liftIO $ readIORef state
+  s <- liftIO $ readTVarIO state
   rw2 <- liftIO $ Gtk.widgetGetAllocatedWidth canvas
   rh2 <- liftIO $ Gtk.widgetGetAllocatedHeight canvas
 
   (bbs, hibbs) <- draw s rw2 rh2
 
-  liftIO $ modifyIORef state (\s' -> s' {bounds = bbs, hoverIconBounds = hibbs})
+  liftIO $ atomically $ modifyTVar' state (\s' -> s' {bounds = bbs, hoverIconBounds = hibbs})
   liftIO $ traceIO "redraw End"
 
 -- | Export the visualization to an SVG file
 export :: DrawFunction -> String -> IO ()
 export drawFn file = do
-  s <- readIORef state
+  s <- readTVarIO state
 
   let (_, _, xSize, ySize) = totalSize s
 
@@ -114,7 +114,7 @@ draw :: State -> Int -> Int -> Render ([(Object Int, Rectangle)], [(Object Int, 
 draw s rw2 rh2 =
   if null $ boxes s then return ([], [])
   else do
-    vS <- liftIO $ readIORef visState
+    vS <- liftIO $ readTVarIO visState
 
     -- Line widths don't count to size, let's add a bit
     let rw = 0.97 * fromIntegral rw2
@@ -172,10 +172,10 @@ drawHoverMenu x = do
 --   that causes the object to be evaluated and the screen to be updated.
 click :: IO ()
 click = do
-  s <- readIORef state
+  s <- readTVarIO state
 
   hm <- inHistoryMode
-  when (not hm) $ case iconHover s of
+  unless hm $ case iconHover s of
     Nothing -> case hover s of
       -- This might fail when a click occurs during an update
       Node t -> evaluateClick s t
@@ -230,13 +230,13 @@ hide b = modifyMVar_ visHidden (\hs -> return $ b : hs)
 --   updated.
 move :: WidgetClass w => w -> IO ()
 move canvas = do
-  vs <- readIORef visState
-  oldS <- readIORef state
+  vs <- readTVarIO visState
+  oldS <- readTVarIO state
   let oldHover = hover oldS
 
       (mx, my) = mousePos vs
 
-      check (o, (x,y,w,h)) =
+      check' (o, (x,y,w,h)) =
         if x <= mx && mx <= x + w &&
            y <= my && my <= y + h
         then o else None
@@ -261,12 +261,12 @@ move canvas = do
   case iconHov of
     Just i -> do
       let ih = Just (oldHover, i)
-      modifyIORef state $ \s' -> s' {iconHover = ih}
+      atomically $ modifyTVar' state $ \s' -> s' {iconHover = ih}
       unless (iconHover oldS == ih) $ widgetQueueDraw canvas
 
     Nothing -> do
-      let h = validOne $ map check $ bounds oldS
-      modifyIORef state $ \s' -> s' {hover = h, iconHover = Nothing}
+      let h = validOne $ map check' $ bounds oldS
+      atomically $ modifyTVar' state $ \s' -> s' {hover = h, iconHover = Nothing}
       unless (oldHover == h && iconHover oldS == Nothing) $ widgetQueueDraw canvas
 
 -- | Something might have changed on the heap, update the view.
@@ -276,5 +276,5 @@ updateObjects _boxes = do
   hidden <- readMVar visHidden
   (ops, bs', _ , size) <- xDotParse $ hidden
 
-  modifyIORef state (\s -> s {operations = ops, boxes = bs', totalSize = size, hover = None})
+  atomically $ modifyTVar' state (\s -> s {operations = ops, boxes = bs', totalSize = size, hover = None})
   traceIO "updateObjects End"
