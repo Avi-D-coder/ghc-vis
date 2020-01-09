@@ -25,7 +25,6 @@ module GHC.Vis.View.Common (
 import Prelude hiding (catch)
 #endif
 
-import Control.Concurrent
 import Control.DeepSeq
 import Control.Exception hiding (evaluate)
 
@@ -50,9 +49,9 @@ visSignal :: TQueue Signal
 visSignal = unsafePerformIO newTQueueIO
 
 -- | Whether a visualization is currently running
-visRunning :: MVar Bool
+visRunning :: TVar Bool
 {-# NOINLINE visRunning #-}
-visRunning = unsafePerformIO (newMVar False)
+visRunning = unsafePerformIO $ newTVarIO False
 
 defaultDepth :: Int
 defaultDepth = 100
@@ -70,14 +69,14 @@ visState :: TVar State
 visState = unsafePerformIO $ newTVarIO $ State (0, 0) defaultView 1 (0, 0) False False defaultDepth
 
 -- | All the visualized boxes
-visBoxes :: MVar [NamedBox]
+visBoxes :: TVar [NamedBox]
 {-# NOINLINE visBoxes #-}
-visBoxes = unsafePerformIO (newMVar [] :: IO (MVar [NamedBox]))
+visBoxes = unsafePerformIO $ newTVarIO []
 
 -- | Hidden boxes
-visHidden :: MVar [Box]
+visHidden :: TVar [Box]
 {-# NOINLINE visHidden #-}
-visHidden = unsafePerformIO (newMVar [] :: IO (MVar [Box]))
+visHidden = unsafePerformIO $ newTVarIO []
 
 -- | All heap graphs since the last clear command
 visHeapHistory :: TVar (Int, [(HeapGraph Identifier, [(Identifier, HeapGraphIndex)])])

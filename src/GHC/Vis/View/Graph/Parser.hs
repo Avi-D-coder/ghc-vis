@@ -116,15 +116,16 @@ removeOld _ x = x
 -- | Take the objects to be visualized and run them through @dot@ and extract
 --   the drawing operations that have to be exectued to show the graph of the
 --   heap map.
-xDotParse :: [Box] -> IO ([(Object Node, Operation)], [Box], [(Object Node, Rectangle)], Rectangle)
+xDotParse :: [Box] -> STM ([(Object Node, Operation)], [Box], [(Object Node, Rectangle)], Rectangle)
 xDotParse hidden = do
   --(hg, _) <- multiBuildHeapGraph 100 as
-  (HeapGraph hg'', _) <- atomically getHeapGraph
+  (HeapGraph hg'', _) <- getHeapGraph
   let hg' = M.filter (\(HeapGraphEntry b _ _ _) -> b `notElem` hidden) hg''
   let hg = HeapGraph $ M.map (\hge -> hge{hgeClosure = fmap (removeOld $ M.keys hg') (hgeClosure hge)}) hg'
   --let hg = HeapGraph $ traverse removeOld hg'
 
-  xDot <- graphvizWithHandle graphvizCommand (defaultVis $ convertGraph hg) (XDot Nothing) hGetDot
+  -- TODO this is horribly unsafe
+  xDot <- unsafeIOToSTM $ graphvizWithHandle graphvizCommand (defaultVis $ convertGraph hg) (XDot Nothing) hGetDot
 
   return (getOperations xDot, getBoxes (HeapGraph hg''), getDimensions xDot, getSize xDot)
 

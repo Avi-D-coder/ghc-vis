@@ -75,7 +75,6 @@ import Data.Version
 import Data.Text ()
 import qualified Data.IntMap as M
 
-import System.Timeout
 import System.Mem
 
 import GHC.HeapView hiding (name)
@@ -129,9 +128,6 @@ positionIncrement = 50
 bigPositionIncrement :: Double
 bigPositionIncrement = 200
 
-signalTimeout :: Int
-signalTimeout = 1000000
-
 #ifdef SDL_WINDOW
 black = SDL.Pixel maxBound
 white = SDL.Pixel 0xFFFFFF
@@ -141,19 +137,23 @@ white = SDL.Pixel 0xFFFFFF
 --   graphical window in a new thread.
 vis :: IO ()
 #ifdef FULL_WINDOW
-vis = do
-  vr <- swapMVar visRunning True
-  unless vr $ void $ forkIO visMainThread
+vis = visStart visMainThread
 #else
 vis = mvis
 #endif
 
+visStart :: IO () -> IO ()
+visStart main = do
+  vr <- atomically $ do
+    r <- readTVar visRunning
+    unless r $ writeTVar visRunning True
+    return r
+  unless vr $ void $ forkIO main
+
 -- | A minimalistic version of ghc-vis, without window decorations, help and
 --   all that other stuff.
 mvis :: IO ()
-mvis = do
-  vr <- swapMVar visRunning True
-  unless vr $ void $ forkIO mVisMainThread
+mvis = visStart mVisMainThread
 
 #ifdef SDL_WINDOW
 -- | SDL version. Not properly working yet. Mainly for testing whether SDL
@@ -262,9 +262,11 @@ mVisMainThread = do
              ]
   (uncurry $ windowSetDefaultSize window) defaultSize
 
+  s <- readTVarIO visState
+
   on canvas draw $ do
-    runCorrect redraw >>= \f -> f canvas
-    runCorrect move >>= \f -> liftIO $ join $ atomically $ f canvas
+    runCorrect s redraw canvas
+    liftIO $ join $ atomically $ runCorrect s move canvas
 
   dummy <- windowNew
 
@@ -326,17 +328,19 @@ setupGUI window canvas legendCanvas = do
               (oldPosX, oldPosY) = position state
           modifyTVar' visState (\s -> s {position = (oldPosX + deltaX, oldPosY + deltaY)})
           return $ widgetQueueDraw canvas
-        else
-          return $ runCorrect move >>= \f -> liftIO $ join $ atomically $ f canvas
+        else do
+          s <- readTVar visState
+          runCorrect s move canvas
       traceIO "on canvas motionNotifyEvent End"
     return True
 
   on canvas buttonPressEvent $ do
     button <- eventButton
     eClick <- eventClick
+    state <- liftIO $ readTVarIO visState
     lift $ do
       when (button == LeftButton && eClick == SingleClick) $
-        join $ runCorrect click
+        atomically $ runCorrect state click
 
       when (button == RightButton && eClick == SingleClick) $
         atomically $ modifyTVar' visState (\s -> s {dragging = True})
@@ -464,8 +468,8 @@ setupGUI window canvas legendCanvas = do
         when (eKeyName `elem` ["period", "bracketright"]) $
           put $ HistorySignal (\x -> x - 1)
 
-      when (eKeyName `elem` ["space", "Return", "KP_Enter"]) $
-        join $ runCorrect click
+        when (eKeyName `elem` ["space", "Return", "KP_Enter"]) $
+          runCorrect state click
 
       widgetQueueDraw canvas
       return True
@@ -481,7 +485,7 @@ setupGUI window canvas legendCanvas = do
 
 quit :: ThreadId -> IO ()
 quit reactThread = do
-  swapMVar visRunning False
+  atomically $ writeTVar visRunning False
   killThread reactThread
 
 #ifdef SDL_WINDOW
@@ -494,7 +498,7 @@ react2 = do
   mbSignal <- timeout signalTimeout (takeMVar visSignal)
   case mbSignal of
     Nothing -> do
-      running <- readMVar visRunning
+      running <- readTVar visRunning
       if running then react2 else
         -- :r caused visRunning to be reset
         (do swapMVar visRunning True
@@ -512,7 +516,7 @@ react2 = do
                     hPutStrLn stderr $ "Couldn't export to file \"" ++ f ++ "\": " ++ err
                     return ())
 
-      boxes <- readMVar visBoxes
+      boxes <- readTVar visBoxes
       performGC -- Else Blackholes appear. Do we want this?
                 -- Blackholes stop our current thread and only resume after
                 -- they have been replaced with their result, thereby leading
@@ -540,84 +544,78 @@ react2 = do
 #endif
 #endif
 
-react :: (WidgetClass w1, WidgetClass w2) => w1 -> w2 -> IO b
+react :: (WidgetClass self1, WidgetClass self2) =>
+           self1 -> self2 -> IO a
 react canvas legendCanvas = do
-  -- Timeout used to handle ghci reloads (:r)
-  -- Reloads cause the visSignal to be reinitialized, but takeMVar is still
-  -- waiting for the old one.  This solution is not perfect, but it works for
-  -- now.
-  mbSignal <- timeout signalTimeout (atomically $ readTQueue visSignal)
+  mbSignal <- atomically $ tryPeekTQueue visSignal
   case mbSignal of
-    Nothing -> do
-      running <- readMVar visRunning
-      if running then react canvas legendCanvas else
-        -- :r caused visRunning to be reset
-        (do swapMVar visRunning True
-            timeout signalTimeout $ atomically $ writeTQueue visSignal UpdateSignal
-            react canvas legendCanvas)
-    Just signal -> do
-      doUpdate <- case signal of
-        NewSignal x n  -> do
-          modifyMVar_ visBoxes (\y -> return $ if ([n], x) `elem` y then y else y ++ [([n], x)])
-          return True
-        ClearSignal    -> do
-          modifyMVar_ visBoxes $ const $ return []
-          modifyMVar_ visHidden $ const $ return []
-          atomically $ modifyTVar' visHeapHistory $ const (0, [(HeapGraph M.empty, [])])
-          return False
-        RestoreSignal -> do
-          modifyMVar_ visHidden $ const $ return []
-          return False
-        RedrawSignal   -> return False
-        UpdateSignal   -> return True
-        SwitchSignal   -> doSwitch >> return False
-        HistorySignal f -> do
-          atomically $ modifyTVar'  visHeapHistory (\(i,xs) -> (max 0 (min (length xs - 1) (f i)), xs))
-          return False
-        ExportSignal d f -> do
-          catch (runCorrect (exportView :: View -> (forall a. FilePath -> Double -> Double -> (Surface -> IO a) -> IO a) -> String -> IO ()) >>= \e -> e d f)
-            (\e -> do let err = show (e :: IOException)
-                      hPutStrLn stderr $ "Couldn't export to file \"" ++ f ++ "\": " ++ err
-                      return ())
-          return False
-
-      boxes <- readMVar visBoxes
-
-      when doUpdate $ do
-        performGC -- Else Blackholes appear. Do we want this?
-                  -- Blackholes stop our current thread and only resume after
-                  -- they have been replaced with their result, thereby leading
-                  -- to an additional element in the HeapMap we don't want.
-                  -- Example for bad behaviour that would happen then:
-                  -- λ> let xs = [1..42] :: [Int]
-                  -- λ> let x = 17 :: Int
-                  -- λ> let ys = [ y | y <- xs, y >= x ]
-
-        s <- readTVarIO visState
-        x <- multiBuildHeapGraph (heapDepth s) boxes
-        atomically $ modifyTVar' visHeapHistory (second ((:) x))
-
-      runCorrect updateObjects >>= \f -> f boxes
-
+    Nothing -> liftIO $ do
+      threadDelay 12000
+      react canvas legendCanvas
+    Just _ -> liftIO $ do
+      (signal, s, boxes) <- atomically reactStm
+      let doUpdate = do
+            performGC -- Else Blackholes appear. Do we want this?
+            -- Blackholes stop our current thread and only resume after
+            -- they have been replaced with their result, thereby leading
+            -- to an additional element in the HeapMap we don't want.
+            -- Example for bad behaviour that would happen then:
+            -- λ> let xs = [1..42] :: [Int]
+            -- λ> let x = 17 :: Int
+            -- λ> let ys = [ y | y <- xs, y >= x ]
+            x <- multiBuildHeapGraph (heapDepth s) boxes
+            atomically $ modifyTVar' visHeapHistory (second ((:) x))
+      case signal of
+        NewSignal _ _ -> doUpdate
+        UpdateSignal -> doUpdate
+        ExportSignal d f ->
+          catch
+            (runCorrect s exportView d f)
+            ( \e -> do
+                let err = show (e :: IOException)
+                hPutStrLn stderr $ "Couldn't export to file \"" ++ f ++ "\": " ++ err
+                return ()
+            )
+        _ -> return ()
+      atomically $ runCorrect s updateObjects boxes
       postGUISync $ widgetQueueDraw canvas
       postGUISync $ widgetQueueDraw legendCanvas
       react canvas legendCanvas
 
-#ifdef GRAPH_VIEW
-  where doSwitch = isGraphvizInstalled >>= \gvi -> if gvi
-          then atomically $ modifyTVar' visState (\s -> s {T.view = succN (T.view s), zoomRatio = 1, position = (0, 0)})
-          else putStrLn "Cannot switch view: The Graphviz binary (dot) is not installed"
+reactStm :: STM (Signal, State, [NamedBox])
+reactStm = do
+  mbSignal <- readTQueue visSignal
+  case mbSignal of
+    signal -> do
+      case signal of
+        NewSignal x n ->
+          modifyTVar' visBoxes (\y -> if ([n], x) `elem` y then y else y ++ [([n], x)])
+        ClearSignal -> do
+          modifyTVar' visBoxes $ const []
+          modifyTVar' visHidden $ const []
+          modifyTVar' visHeapHistory $ const (0, [(HeapGraph M.empty, [])])
+        RestoreSignal ->
+          modifyTVar' visHidden $ const []
+        HistorySignal f ->
+          modifyTVar' visHeapHistory (\(i, xs) -> (max 0 (min (length xs - 1) (f i)), xs))
+        _ -> return ()
+      boxes <- readTVar visBoxes
+      s <- readTVar visState
+      return (signal, s, boxes)
 
-        succN GraphView = ListView
-        succN ListView = GraphView
-#else
-  where doSwitch = putStrLn "Cannot switch view: Graph view disabled at build"
-#endif
+-- #ifdef GRAPH_VIEW
+  -- where doSwitch = isGraphvizInstalled >>= \gvi -> if gvi
+  --         then atomically $ modifyTVar' visState (\s -> s {T.view = succN (T.view s), zoomRatio = 1, position = (0, 0)})
+  --         else putStrLn "Cannot switch view: The Graphviz binary (dot) is not installed"
 
-runCorrect :: MonadIO m => (View -> f) -> m f
-runCorrect f = do
-  s <- liftIO $ readTVarIO visState
-  return $ f $ views !! fromEnum (T.view s)
+  --       succN GraphView = ListView
+  --       succN ListView = GraphView
+-- #else
+  -- where doSwitch = putStrLn "Cannot switch view: Graph view disabled at build"
+-- #endif
+
+runCorrect :: State -> (View -> a) -> a
+runCorrect s f = f $ views !! fromEnum (T.view s)
 
 zoomImage :: WidgetClass w1 => w1 -> State -> Double -> T.Point -> T.Point
 zoomImage _canvas s newZoomRatio _mousePos@(_x', _y') =
@@ -699,13 +697,14 @@ visMainThread = do
   legendGraphSVG <- My.getDataFileName "data/legend_graph.svg" >>= svgNewFromFile
 
   on canvas draw $ do
-    boxes <- liftIO $ readMVar visBoxes
+    boxes <- liftIO $ atomically $ readTVar visBoxes
+    s <- liftIO $ readTVarIO visState
 
     if null boxes
     then renderSVGScaled canvas welcomeSVG
     else do
-      runCorrect redraw >>= \f -> f canvas
-      runCorrect move >>= \f -> liftIO $ atomically $ f canvas
+      runCorrect s redraw canvas
+      liftIO $ atomically $ runCorrect s move canvas
       return ()
 
   on legendCanvas draw $ do

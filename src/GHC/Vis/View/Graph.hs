@@ -23,7 +23,6 @@ import Graphics.UI.Gtk hiding (Box, Signal, Rectangle, draw)
 import qualified Graphics.UI.Gtk as Gtk
 import Graphics.Rendering.Cairo hiding (x, y)
 
-import Control.Concurrent
 import Control.Concurrent.STM
 import Control.Monad
 import Control.Exception
@@ -36,6 +35,7 @@ import GHC.Vis.Types hiding (State, View(..))
 import GHC.Vis.View.Common
 
 import GHC.HeapView hiding (size)
+import GHC.Conc
 
 import Graphics.XDot.Viewer
 import Graphics.XDot.Types hiding (size, w, h)
@@ -170,12 +170,10 @@ drawHoverMenu x = do
 
 -- | Handle a mouse click. If an object was clicked an 'UpdateSignal' is sent
 --   that causes the object to be evaluated and the screen to be updated.
-click :: IO ()
+click :: STM ()
 click = do
-  (s, hm) <- atomically $ do
-    s <- readTVar state
-    hm <- inHistoryMode
-    return (s, hm)
+  s <- readTVar state
+  hm <- inHistoryMode
 
   unless hm $ case iconHover s of
     Nothing -> case hover s of
@@ -191,19 +189,19 @@ click = do
     Just (Node t, CollapseIcon) -> collapseClick s t
     _ -> return ()
 
-evaluateClick :: State -> Int -> IO ()
+evaluateClick :: State -> Int -> STM ()
 evaluateClick s t = unless (length (boxes s) <= t) $ do
   evaluate2 $ boxes s !! t
-  atomically $ writeTQueue visSignal UpdateSignal
+  writeTQueue visSignal UpdateSignal
 
-collapseClick :: State -> Int -> IO ()
+collapseClick :: State -> Int -> STM ()
 collapseClick s t = unless (length (boxes s) <= t) $ do
   hide $ boxes s !! t
-  atomically $ writeTQueue visSignal UpdateSignal
+  writeTQueue visSignal UpdateSignal
 
-evaluate2 :: Box -> IO ()
+evaluate2 :: Box -> STM ()
 evaluate2 b@(Box a) = do
-  c <- getBoxedClosureData b
+  c <- unsafeIOToSTM $ getBoxedClosureData b
   case c of
     -- ghc: internal error: MUT_ARR_PTRS_FROZEN object entered!
     -- (GHC version 7.4.2 for x86_64_unknown_linux)
@@ -219,11 +217,11 @@ evaluate2 b@(Box a) = do
     APClosure{} -> a `seq` return ()
     PAPClosure{} -> a `seq` return ()
     _ -> return ()
-  `catch`
-    \(e :: SomeException) -> putStrLn $ "Caught exception while evaluating: " ++ show e
+  `catchSTM`
+    \(e :: SomeException) -> unsafeIOToSTM $ putStrLn $ "Caught exception while evaluating: " ++ show e
 
-hide :: Box -> IO ()
-hide b = modifyMVar_ visHidden (\hs -> return $ b : hs)
+hide :: Box -> STM ()
+hide b = modifyTVar' visHidden (b :)
 
 -- | Handle a mouse move. Causes an 'UpdateSignal' if the mouse is hovering a
 --   different object now, so the object gets highlighted and the screen
@@ -270,11 +268,9 @@ move canvas = do
       return $ unless (oldHover == h && isNothing (iconHover oldS)) $ widgetQueueDraw canvas
 
 -- | Something might have changed on the heap, update the view.
-updateObjects :: [NamedBox] -> IO ()
+updateObjects :: [NamedBox] -> STM ()
 updateObjects _boxes = do
-  traceIO "updateObjects"
-  hidden <- readMVar visHidden
+  hidden <- readTVar visHidden
   (ops, bs', _ , size) <- xDotParse hidden
 
-  atomically $ modifyTVar' state (\s -> s {operations = ops, boxes = bs', totalSize = size, hover = None})
-  traceIO "updateObjects End"
+  modifyTVar' state (\s -> s {operations = ops, boxes = bs', totalSize = size, hover = None})

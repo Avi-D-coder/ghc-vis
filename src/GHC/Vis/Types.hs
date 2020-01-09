@@ -48,9 +48,9 @@ data Signal = NewSignal Box String -- ^ Add a new Box to be visualized
 -- | All functions a view has to provide
 data View = View
   { redraw        :: forall w. WidgetClass w => w -> Render ()
-  , click         :: IO ()
+  , click         :: STM ()
   , move          :: forall w. WidgetClass w => w -> STM (IO ())
-  , updateObjects :: [NamedBox] -> IO ()
+  , updateObjects :: [NamedBox] -> STM ()
   , exportView    :: DrawFunction -> String -> IO ()
   }
 

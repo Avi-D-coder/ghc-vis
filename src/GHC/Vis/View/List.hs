@@ -168,8 +168,8 @@ draw s rw2 rh2 = do
 
 -- | Handle a mouse click. If an object was clicked an 'UpdateSignal' is sent
 --   that causes the object to be evaluated and the screen to be updated.
-click :: IO ()
-click = atomically $ do
+click :: STM ()
+click = do
   s <- readTVar state
 
   hm <- inHistoryMode
@@ -201,8 +201,8 @@ move canvas = do
   return $ unless (oldHover == hover s) $ widgetQueueDraw canvas
 
 -- | Something might have changed on the heap, update the view.
-updateObjects :: [NamedBox] -> IO ()
-updateObjects boxes = atomically $ do
+updateObjects :: [NamedBox] -> STM ()
+updateObjects boxes = do
   os <- parseBoxes
   --(h, is) <- multiBuildHeapGraph 100 $ map fst boxes
   -- This is wrong
