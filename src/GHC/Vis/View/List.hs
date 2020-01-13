@@ -202,10 +202,12 @@ move canvas = do
 -- | Something might have changed on the heap, update the view.
 updateObjects :: [NamedBox] -> IO ()
 updateObjects boxes = do
+  putStr "List.updateObjects"
   T.State {heapDepth} <- readTVarIO visState
   hg <- multiBuildHeapGraph heapDepth boxes
   let objs = zipWith (\(y, x) z -> (x, intercalate ", " y, z)) boxes $ parseBoxes hg
   atomically $ modifyTVar' state (\s -> s {objects = objs, hover = Nothing})
+  putStr "List.updateObjects END"
 
 drawEntry :: State -> Double -> Double -> ([VisObject], Double, String) -> Render [(String, Rectangle)]
 drawEntry s nameWidth xPos (obj, pos, name') = do

@@ -290,7 +290,9 @@ move canvas = do
 -- | Something might have changed on the heap, update the view.
 updateObjects :: [NamedBox] -> IO ()
 updateObjects boxes = do
+  putStr "Graph.updateObjects"
   T.State {heapDepth} <- readTVarIO visState
   hidden <- readTVarIO visHidden
   (ops, bs', _, size) <- xDotParse heapDepth boxes hidden
   atomically $ modifyTVar' state (\s -> s {operations = ops, boxes = bs', totalSize = size, hover = None})
+  putStr "Graph.updateObjects END"

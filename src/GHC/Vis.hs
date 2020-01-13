@@ -570,7 +570,7 @@ react canvas legendCanvas = do
         _ -> return ()
       runCorrect s updateObjects boxes
       postGUISync $ widgetQueueDraw canvas
-      postGUISync $ widgetQueueDraw legendCanvas
+      -- postGUISync $ widgetQueueDraw legendCanvas
       react canvas legendCanvas
 
 reactStm :: STM (Signal, State, [NamedBox])
@@ -580,7 +580,7 @@ reactStm = do
     signal -> do
       case signal of
         NewSignal x n ->
-          modifyTVar' visBoxes (\y -> if ([n], x) `elem` y then y else y ++ [([n], x)])
+          modifyTVar' visBoxes (([n], x):)
         ClearSignal -> do
           modifyTVar' visBoxes $ const []
           modifyTVar' visHidden $ const []

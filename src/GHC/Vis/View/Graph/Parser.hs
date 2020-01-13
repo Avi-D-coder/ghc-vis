@@ -29,12 +29,11 @@ import Data.GraphViz.Commands.IO
 import GHC.HeapView hiding (name)
 import GHC.Vis.Internal (showClosureFields)
 import GHC.Vis.Types
-import GHC.Vis.View.Common
-import GHC.Conc
 
 import Graphics.XDot.Types hiding (name, h, Style, Color)
 import Graphics.XDot.Parser
-import System.IO.Unsafe
+import Control.Monad.Extra
+import System.Mem
 
 fontName :: B.Text
 --fontName = "Times Roman"
@@ -114,14 +113,19 @@ removeOld keys (Just x)
   | otherwise     = Nothing
 removeOld _ x = x
 
+notElemM :: Box -> [Box] -> IO Bool
+notElemM x xs = not <$> anyM (`areBoxesEqual` x) xs
+
 -- | Take the objects to be visualized and run them through @dot@ and extract
 --   the drawing operations that have to be executed to show the graph of the
 --   heap map.
 xDotParse :: Int -> [NamedBox] -> [Box] -> IO ([(Object Node, Operation)], [Box], [(Object Node, Rectangle)], Rectangle)
-xDotParse heapDepth boxes hidden = do
-    (HeapGraph hg'', _) <- multiBuildHeapGraph (heapDepth) boxes
-    let hg' = M.filter (\(HeapGraphEntry b _ _ _) -> b `notElem` hidden) hg''
-        hg = HeapGraph $ fmap (\hge -> hge{hgeClosure = fmap (removeOld $ M.keys hg') (hgeClosure hge)}) hg'
+xDotParse hd boxes hidden = do
+    performGC
+    (HeapGraph hg'', _) <- multiBuildHeapGraph hd boxes
+    hgl <- filterM (\(_, (HeapGraphEntry b _ _ _)) -> b `notElemM` hidden) $ M.toList hg''
+    let hg' = M.fromList hgl
+    let hg = HeapGraph $ fmap (\hge -> hge{hgeClosure = fmap (removeOld $ M.keys hg') (hgeClosure hge)}) hg'
     xDot <- graphvizWithHandle graphvizCommand (defaultVis $ convertGraph hg) (XDot Nothing) hGetDot
     return (getOperations xDot, getBoxes (HeapGraph hg''), getDimensions xDot, getSize xDot)
 
