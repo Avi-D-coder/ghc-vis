@@ -1,3 +1,4 @@
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE CPP, RankNTypes #-}
 {- |
    Module      : GHC.Vis.View.List
@@ -37,9 +38,10 @@ import Data.List
 import System.IO.Unsafe
 
 import GHC.Vis.Types hiding (State, View(..))
+import qualified GHC.Vis.Types as T
 import GHC.Vis.View.Common
 
-import GHC.HeapView (Box)
+import GHC.HeapView
 
 type Rectangle = (Double, Double, Double, Double)
 
@@ -104,8 +106,8 @@ redraw canvas = do
   rw2 <- liftIO $ Gtk.widgetGetAllocatedWidth canvas
   rh2 <- liftIO $ Gtk.widgetGetAllocatedHeight canvas
 
-  (size, boundingBoxes) <- draw s rw2 rh2
-  liftIO $ atomically $ modifyTVar' state (\s' -> s' {totalSize = size, bounds = boundingBoxes})
+  (size', boundingBoxes) <- draw s rw2 rh2
+  liftIO $ atomically $ modifyTVar' state (\s' -> s' {totalSize = size', bounds = boundingBoxes})
 
 #ifdef SDL_WINDOW
 getState :: IO State
@@ -168,17 +170,14 @@ draw s rw2 rh2 = do
 
 -- | Handle a mouse click. If an object was clicked an 'UpdateSignal' is sent
 --   that causes the object to be evaluated and the screen to be updated.
-click :: STM ()
+click :: IO ()
 click = do
-  s <- readTVar state
-
-  hm <- inHistoryMode
+  s <- readTVarIO state
+  hm <- atomically inHistoryMode
   unless hm $ case hover s of
     Just t -> do
       evaluate t
-      -- Without forkIO it would hang indefinitely if some action is currently
-      -- executed
-      writeTQueue visSignal UpdateSignal
+      atomically $ writeTQueue visSignal UpdateSignal
     _ -> return ()
 
 -- | Handle a mouse move. Causes an 'UpdateSignal' if the mouse is hovering a
@@ -201,21 +200,19 @@ move canvas = do
   return $ unless (oldHover == hover s) $ widgetQueueDraw canvas
 
 -- | Something might have changed on the heap, update the view.
-updateObjects :: [NamedBox] -> STM ()
+updateObjects :: [NamedBox] -> IO ()
 updateObjects boxes = do
-  os <- parseBoxes
-  --(h, is) <- multiBuildHeapGraph 100 $ map fst boxes
-  -- This is wrong
-  --let os = visHeapGraph (zipWith (\(b,i) (b',n) -> (i,n)) is boxes) h
-  let objs = zipWith (\(y,x) z -> (x,intercalate ", " y,z)) boxes os
-  modifyTVar' state (\s -> s {objects = objs, hover = Nothing})
+  T.State {heapDepth} <- readTVarIO visState
+  hg <- multiBuildHeapGraph heapDepth boxes
+  let objs = zipWith (\(y, x) z -> (x, intercalate ", " y, z)) boxes $ parseBoxes hg
+  atomically $ modifyTVar' state (\s -> s {objects = objs, hover = Nothing})
 
 drawEntry :: State -> Double -> Double -> ([VisObject], Double, String) -> Render [(String, Rectangle)]
-drawEntry s nameWidth xPos (obj, pos, name) = do
+drawEntry s nameWidth xPos (obj, pos, name') = do
   save
   translate xPos pos
   moveTo 0 0
-  drawBox s $ Unnamed name
+  drawBox s $ Unnamed name'
   translate nameWidth 0
   moveTo 0 0
   boundingBoxes <- mapM (drawBox s) obj
@@ -246,13 +243,13 @@ drawBox s o@(Function target) =
 drawBox s o@(Link target) =
   drawFunctionLink s o target colorLink colorLinkHighlighted
 
-drawBox s o@(Named name content) = do
+drawBox s o@(Named name' content) = do
   (x,_) <- getCurrentPoint
 
   hc <- height content
   wc <- width o
 
-  (layout, metrics) <- pangoLayout name
+  (layout, metrics) <- pangoLayout name'
   (_, PangoRectangle _ _ xa fh) <- liftIO $ layoutGetExtents layout
   let fa = ascent metrics
 
@@ -266,7 +263,7 @@ drawBox s o@(Named name content) = do
   setLineCap LineCapRound
   roundedRect ux uy uw uh
 
-  setColor s name colorName colorNameHighlighted
+  setColor s name' colorName colorNameHighlighted
 
   fillAndSurround
 
@@ -283,7 +280,7 @@ drawBox s o@(Named name content) = do
   showLayout layout
   moveTo (x + wc) 0
 
-  return $ concat bb ++ [(name, (ux, uy, uw, uh))]
+  return $ concat bb ++ [(name', (ux, uy, uw, uh))]
 
 pangoLayout :: String -> Render (PangoLayout, FontMetrics)
 pangoLayout text = do
@@ -370,8 +367,8 @@ drawFunctionLink s o target color1 color2 = do
   return [(target, (ux, uy, uw, uh))]
 
 setColor :: State -> String -> RGB -> RGB -> Render ()
-setColor s name (r,g,b) (r',g',b') = case hover s of
-  Just t -> if t == name then setSourceRGB r' g' b'
+setColor s name' (r,g,b) (r',g',b') = case hover s of
+  Just t -> if t == name' then setSourceRGB r' g' b'
                          else setSourceRGB r  g  b
   _ -> setSourceRGB r g b
 

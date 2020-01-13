@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, MagicHash, DeriveDataTypeable, NoMonomorphismRestriction, RankNTypes, RecordWildCards #-}
+{-# LANGUAGE CPP, NoMonomorphismRestriction, RankNTypes, RecordWildCards #-}
 
 {- |
    Module      : GHC.Vis.Internal
@@ -6,8 +6,7 @@
    License     : 3-Clause BSD-style
    Maintainer  : dennis@felsin9.de
 
- -}
-module GHC.Vis.Internal (
+ -}module GHC.Vis.Internal (
   parseClosure,
   showClosureFields
   )
@@ -66,7 +65,7 @@ setName i = do
   if null n
   then do
     s@(PState ti fi xi _ (HeapGraph m)) <- get
-    let Just hge@(HeapGraphEntry{hgeClosure = c}) = M.lookup i m
+    let Just hge@HeapGraphEntry{hgeClosure = c} = M.lookup i m
     let (name,newState) = case bindingLetter c of
           't' -> ('t' : show ti, s{tCounter' = ti + 1})
           'f' -> ('f' : show fi, s{fCounter' = fi + 1})
@@ -148,21 +147,21 @@ parseInternal _ (ConstrClosure (StgInfoTable _ 1 3 _ _ _) _ [_,0,0] _ "Data.Byte
   = return [Unnamed "ByteString 0 0"]
 
 parseInternal _ (ConstrClosure (StgInfoTable _ 1 3 _ _ _) [bPtr] [_,start,end] _ "Data.ByteString.Internal" "PS")
-  = do cPtr  <- liftM mbParens $ contParse bPtr
+  = do cPtr  <- mbParens <$> contParse bPtr
        return $ Unnamed (printf "ByteString %d %d " start end) : cPtr
 
 parseInternal _ (ConstrClosure (StgInfoTable _ 2 3 _ _ _) [bPtr1,bPtr2] [_,start,end] _ "Data.ByteString.Lazy.Internal" "Chunk")
-  = do cPtr1 <- liftM mbParens $ contParse bPtr1
-       cPtr2 <- liftM mbParens $ contParse bPtr2
+  = do cPtr1 <- mbParens <$> contParse bPtr1
+       cPtr2 <- mbParens <$> contParse bPtr2
        return $ Unnamed (printf "Chunk %d %d " start end) : cPtr1 ++ [Unnamed " "] ++ cPtr2
 
 parseInternal _ (ConstrClosure (StgInfoTable _ 2 0 _ _ _) [bHead,bTail] [] _ "GHC.Types" ":")
-  = do cHead <- liftM mbParens $ contParse bHead
-       cTail <- liftM mbParens $ contParse bTail
+  = do cHead <- mbParens <$> contParse bHead
+       cTail <- mbParens <$> contParse bTail
        return $ cHead ++ [Unnamed ":"] ++ cTail
 
 parseInternal _ (ConstrClosure _ bPtrs dArgs _ _ name)
-  = do cPtrs <- mapM (liftM mbParens . contParse) bPtrs
+  = do cPtrs <- mapM (fmap mbParens . contParse) bPtrs
        let tPtrs = intercalate [Unnamed " "] cPtrs
        let sPtrs = if null tPtrs then [Unnamed ""] else Unnamed " " : tPtrs
        return $ Unnamed (unwords $ infixFix name : map show dArgs) : sPtrs
@@ -247,9 +246,9 @@ parseInternal i (APStackClosure _ fun pl) = do
   return $ Thunk (infixFix name) : fPtr ++ sPtrs
 
 parseInternal _ (MVarClosure _ qHead qTail qValue)
-   = do cHead <- liftM mbParens $ contParse qHead
-        cTail <- liftM mbParens $ contParse qTail
-        cValue <- liftM mbParens $ contParse qValue
+   = do cHead <- mbParens <$> contParse qHead
+        cTail <- mbParens <$> contParse qTail
+        cValue <- mbParens <$> contParse qValue
         return $ Unnamed "MVar#(" : cHead ++ [Unnamed ","] ++ cTail ++ [Unnamed ","] ++ cValue ++ [Unnamed ")"]
 
 contParse :: Maybe HeapGraphIndex -> PrintState [VisObject]
@@ -434,4 +433,4 @@ isInfix (x:_)
   | isSymbol x          = True
   | isPunctuation x     = True
   | otherwise           = False
-  where ascSymbols = ("!#$%&*+./<=>?@  \\^|-~:" :: String)
+  where ascSymbols = "!#$%&*+./<=>?@  \\^|-~:" :: String

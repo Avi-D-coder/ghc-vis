@@ -34,6 +34,7 @@ import GHC.Conc
 
 import Graphics.XDot.Types hiding (name, h, Style, Color)
 import Graphics.XDot.Parser
+import System.IO.Unsafe
 
 fontName :: B.Text
 --fontName = "Times Roman"
@@ -114,20 +115,15 @@ removeOld keys (Just x)
 removeOld _ x = x
 
 -- | Take the objects to be visualized and run them through @dot@ and extract
---   the drawing operations that have to be exectued to show the graph of the
+--   the drawing operations that have to be executed to show the graph of the
 --   heap map.
-xDotParse :: [Box] -> STM ([(Object Node, Operation)], [Box], [(Object Node, Rectangle)], Rectangle)
-xDotParse hidden = do
-  --(hg, _) <- multiBuildHeapGraph 100 as
-  (HeapGraph hg'', _) <- getHeapGraph
-  let hg' = M.filter (\(HeapGraphEntry b _ _ _) -> b `notElem` hidden) hg''
-  let hg = HeapGraph $ M.map (\hge -> hge{hgeClosure = fmap (removeOld $ M.keys hg') (hgeClosure hge)}) hg'
-  --let hg = HeapGraph $ traverse removeOld hg'
-
-  -- TODO this is horribly unsafe
-  xDot <- unsafeIOToSTM $ graphvizWithHandle graphvizCommand (defaultVis $ convertGraph hg) (XDot Nothing) hGetDot
-
-  return (getOperations xDot, getBoxes (HeapGraph hg''), getDimensions xDot, getSize xDot)
+xDotParse :: Int -> [NamedBox] -> [Box] -> IO ([(Object Node, Operation)], [Box], [(Object Node, Rectangle)], Rectangle)
+xDotParse heapDepth boxes hidden = do
+    (HeapGraph hg'', _) <- multiBuildHeapGraph (heapDepth) boxes
+    let hg' = M.filter (\(HeapGraphEntry b _ _ _) -> b `notElem` hidden) hg''
+        hg = HeapGraph $ fmap (\hge -> hge{hgeClosure = fmap (removeOld $ M.keys hg') (hgeClosure hge)}) hg'
+    xDot <- graphvizWithHandle graphvizCommand (defaultVis $ convertGraph hg) (XDot Nothing) hGetDot
+    return (getOperations xDot, getBoxes (HeapGraph hg''), getDimensions xDot, getSize xDot)
 
 getBoxes :: HeapGraph a -> [Box]
 getBoxes (HeapGraph hg) = map (\(HeapGraphEntry b _ _ _) -> b) $ M.elems hg

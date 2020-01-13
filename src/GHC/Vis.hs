@@ -67,15 +67,12 @@ import Control.Monad.IO.Class
 import Control.Monad.Trans.Class
 
 import Control.Exception hiding (evaluate)
-import Control.Arrow
 
 import Data.Char
 import Data.Version
 
 import Data.Text ()
-import qualified Data.IntMap as M
-
-import System.Mem
+import Data.GraphViz.Commands
 
 import GHC.HeapView hiding (name)
 
@@ -85,12 +82,10 @@ import GHC.Vis.View.Common
 import qualified GHC.Vis.View.List as List
 
 #ifdef GRAPH_VIEW
-import Data.GraphViz.Commands
 import qualified GHC.Vis.View.Graph as Graph
 #endif
 
 import Graphics.Rendering.Cairo hiding (restore, x, y, width, height)
-import Debug.Trace
 
 #ifdef FULL_WINDOW
 import Graphics.Rendering.Cairo.SVG
@@ -169,35 +164,35 @@ view :: a -> String -> IO ()
 view a name = atomically $ put $ NewSignal (asBox a) name
 
 -- | Evaluate an object that is shown in the visualization. (Names start with 't')
-eval :: String -> STM ()
+eval :: String -> IO ()
 eval t = evaluate t >> update
 
 -- | Switch between the list view and the graph view
-switch :: STM ()
-switch = put SwitchSignal
+switch :: IO ()
+switch = aPut SwitchSignal
 
 -- | When an object is updated by accessing it, you have to call this to
 --   refresh the visualization window. You can also click on an object to force
 --   an update.
-update :: STM ()
-update = put UpdateSignal
+update :: IO ()
+update = aPut UpdateSignal
 
 -- | Clear the visualization window, removing all expressions from it
-clear :: STM ()
-clear = put ClearSignal
+clear :: IO ()
+clear = aPut ClearSignal
 
 -- | Reset the hidden boxes
-restore :: STM ()
-restore = put RestoreSignal
+restore :: IO ()
+restore = aPut RestoreSignal
 
 -- | Change position in history
-history :: (Int -> Int) -> STM ()
-history = put . HistorySignal
+history :: (Int -> Int) -> IO ()
+history = aPut . HistorySignal
 
 -- | Set the maximum depth for following closures on the heap
-setDepth :: Int -> STM ()
+setDepth :: Int -> IO ()
 setDepth newDepth
-  | newDepth > 0 = modifyTVar' visState (\s -> s {heapDepth = newDepth})
+  | newDepth > 0 = atomically $ modifyTVar' visState (\s -> s {heapDepth = newDepth})
   | otherwise    = error "Heap depth has to be positive"
 
 zoom :: WidgetClass w => w -> (Double -> Double) -> STM (IO ())
@@ -247,6 +242,9 @@ export' filename = case mbDrawFn of
 
 put :: Signal -> STM ()
 put = writeTQueue visSignal
+
+aPut :: Signal -> IO ()
+aPut sig = atomically $ writeTQueue visSignal sig
 
 mVisMainThread :: IO ()
 mVisMainThread = do
@@ -314,10 +312,8 @@ setupGUI :: (WidgetClass w1, WidgetClass w2, WidgetClass w3) => w1 -> w2 -> w3 -
 setupGUI window canvas legendCanvas = do
   widgetAddEvents canvas [PointerMotionMask]
   on canvas motionNotifyEvent $ do
-    liftIO $ traceIO "on canvas motionNotifyEvent"
     (x,y) <- eventCoordinates
-    lift $ do
-      atomically $ do
+    lift $ atomically $ do
         state <- readTVar visState
         modifyTVar' visState (\s -> s {mousePos = (x,y)})
 
@@ -331,7 +327,6 @@ setupGUI window canvas legendCanvas = do
         else do
           s <- readTVar visState
           runCorrect s move canvas
-      traceIO "on canvas motionNotifyEvent End"
     return True
 
   on canvas buttonPressEvent $ do
@@ -340,7 +335,7 @@ setupGUI window canvas legendCanvas = do
     state <- liftIO $ readTVarIO visState
     lift $ do
       when (button == LeftButton && eClick == SingleClick) $
-        atomically $ runCorrect state click
+        runCorrect state click
 
       when (button == RightButton && eClick == SingleClick) $
         atomically $ modifyTVar' visState (\s -> s {dragging = True})
@@ -362,7 +357,6 @@ setupGUI window canvas legendCanvas = do
   on canvas scrollEvent $ do
     direction <- eventScrollDirection
     lift $ do
-      traceIO "on canvas scrollEvent"
       atomically $ do
         state <- readTVar visState
 
@@ -377,15 +371,18 @@ setupGUI window canvas legendCanvas = do
           modifyTVar' visState (\s -> s {zoomRatio = newZoomRatio, position = newPos})
 
       widgetQueueDraw canvas
-      traceIO "on canvas scrollEvent End"
       return True
 
   on window keyPressEvent $ do
     eKeyName <- eventKeyName
+
+    when (eKeyName `elem` ["space", "Return", "KP_Enter"]) $ lift $ do
+      state <- readTVarIO visState
+      runCorrect state click
+
     lift $ do
       atomically $ do
         state <- readTVar visState
-
 
         when (eKeyName `elem` ["plus", "Page_Up", "KP_Add"]) $ do
           let newZoomRatio = zoomRatio state * zoomIncrement
@@ -467,9 +464,6 @@ setupGUI window canvas legendCanvas = do
 
         when (eKeyName `elem` ["period", "bracketright"]) $
           put $ HistorySignal (\x -> x - 1)
-
-        when (eKeyName `elem` ["space", "Return", "KP_Enter"]) $
-          runCorrect state click
 
       widgetQueueDraw canvas
       return True
@@ -554,20 +548,7 @@ react canvas legendCanvas = do
       react canvas legendCanvas
     Just _ -> liftIO $ do
       (signal, s, boxes) <- atomically reactStm
-      let doUpdate = do
-            performGC -- Else Blackholes appear. Do we want this?
-            -- Blackholes stop our current thread and only resume after
-            -- they have been replaced with their result, thereby leading
-            -- to an additional element in the HeapMap we don't want.
-            -- Example for bad behaviour that would happen then:
-            -- λ> let xs = [1..42] :: [Int]
-            -- λ> let x = 17 :: Int
-            -- λ> let ys = [ y | y <- xs, y >= x ]
-            x <- multiBuildHeapGraph (heapDepth s) boxes
-            atomically $ modifyTVar' visHeapHistory (second ((:) x))
       case signal of
-        NewSignal _ _ -> doUpdate
-        UpdateSignal -> doUpdate
         ExportSignal d f ->
           catch
             (runCorrect s exportView d f)
@@ -576,8 +557,18 @@ react canvas legendCanvas = do
                 hPutStrLn stderr $ "Couldn't export to file \"" ++ f ++ "\": " ++ err
                 return ()
             )
+        SwitchSignal -> do
+          let succN GraphView = ListView
+              succN ListView = GraphView
+#ifdef GRAPH_VIEW
+          isGraphvizInstalled >>= \gvi -> if gvi
+            then atomically $ modifyTVar' visState (\s' -> s' {T.view = succN (T.view s'), zoomRatio = 1, position = (0, 0)})
+            else putStrLn "Cannot switch view: The Graphviz binary (dot) is not installed"
+#else
+          putStrLn "Cannot switch view: Graph view disabled at build"
+#endif
         _ -> return ()
-      atomically $ runCorrect s updateObjects boxes
+      runCorrect s updateObjects boxes
       postGUISync $ widgetQueueDraw canvas
       postGUISync $ widgetQueueDraw legendCanvas
       react canvas legendCanvas
@@ -593,26 +584,16 @@ reactStm = do
         ClearSignal -> do
           modifyTVar' visBoxes $ const []
           modifyTVar' visHidden $ const []
-          modifyTVar' visHeapHistory $ const (0, [(HeapGraph M.empty, [])])
+          writeTVar visHeapHistory (-1)
         RestoreSignal ->
           modifyTVar' visHidden $ const []
-        HistorySignal f ->
-          modifyTVar' visHeapHistory (\(i, xs) -> (max 0 (min (length xs - 1) (f i)), xs))
+        HistorySignal f -> do
+          xs <- readTVar visBoxes
+          modifyTVar' visHeapHistory $ \i -> max 0 (min (length xs - 1) (f i))
         _ -> return ()
-      boxes <- readTVar visBoxes
       s <- readTVar visState
+      boxes <- readTVar visBoxes
       return (signal, s, boxes)
-
--- #ifdef GRAPH_VIEW
-  -- where doSwitch = isGraphvizInstalled >>= \gvi -> if gvi
-  --         then atomically $ modifyTVar' visState (\s -> s {T.view = succN (T.view s), zoomRatio = 1, position = (0, 0)})
-  --         else putStrLn "Cannot switch view: The Graphviz binary (dot) is not installed"
-
-  --       succN GraphView = ListView
-  --       succN ListView = GraphView
--- #else
-  -- where doSwitch = putStrLn "Cannot switch view: Graph view disabled at build"
--- #endif
 
 runCorrect :: State -> (View -> a) -> a
 runCorrect s f = f $ views !! fromEnum (T.view s)
@@ -670,17 +651,17 @@ visMainThread = do
         spinButtonSetValue depthSpin $ fromIntegral $ heapDepth s
 
 
-  getO castToMenuItem "clear"       >>= \item -> on item menuItemActivated $ atomically clear
-  getO castToMenuItem "switch"      >>= \item -> on item menuItemActivated $ atomically switch
-  getO castToMenuItem "restore"     >>= \item -> on item menuItemActivated $ atomically restore
-  getO castToMenuItem "update"      >>= \item -> on item menuItemActivated $ atomically update
+  getO castToMenuItem "clear"       >>= \item -> on item menuItemActivated clear
+  getO castToMenuItem "switch"      >>= \item -> on item menuItemActivated switch
+  getO castToMenuItem "restore"     >>= \item -> on item menuItemActivated restore
+  getO castToMenuItem "update"      >>= \item -> on item menuItemActivated update
   getO castToMenuItem "setdepth"    >>= \item -> on item menuItemActivated $ setDepthSpin >> widgetShow depthDialog
   getO castToMenuItem "export"      >>= \item -> on item menuItemActivated $ widgetShow saveDialog
   getO castToMenuItem "quit"        >>= \item -> on item menuItemActivated $ widgetDestroy window
   getO castToMenuItem "about"       >>= \item -> on item menuItemActivated $ widgetShow aboutDialog
   getO castToMenuItem "legend"      >>= \item -> on item menuItemActivated $ widgetShow legendDialog
-  getO castToMenuItem "timeback"    >>= \item -> on item menuItemActivated $ atomically $ history (+1)
-  getO castToMenuItem "timeforward" >>= \item -> on item menuItemActivated $ atomically $ history (\x -> x - 1)
+  getO castToMenuItem "timeback"    >>= \item -> on item menuItemActivated $ history (+1)
+  getO castToMenuItem "timeforward" >>= \item -> on item menuItemActivated $ history (\x -> x - 1)
   getO castToMenuItem "zoomin"      >>= \item -> on item menuItemActivated $ join $ atomically $ zoom canvas (*1.25)
   getO castToMenuItem "zoomout"     >>= \item -> on item menuItemActivated $ join $ atomically $ zoom canvas (/1.25)
   getO castToMenuItem "left"        >>= \item -> on item menuItemActivated $ movePos canvas (\(x,y) -> (x + positionIncrement, y))
@@ -734,7 +715,7 @@ setDepthDialog :: Dialog -> SpinButton -> ResponseId -> IO ()
 setDepthDialog depthDialog depthSpin responseId = do
   case responseId of
     ResponseOk -> do depth <- spinButtonGetValue depthSpin
-                     atomically $ setDepth $ round depth
+                     setDepth $ round depth
     _ -> return ()
   widgetHide depthDialog
 

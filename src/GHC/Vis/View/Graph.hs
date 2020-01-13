@@ -1,3 +1,4 @@
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE CPP, RankNTypes, ScopedTypeVariables #-}
 {- |
    Module      : GHC.Vis.View.Graph
@@ -11,7 +12,7 @@ module GHC.Vis.View.Graph (
   redraw,
   click,
   move,
-  updateObjects
+  updateObjects,
   )
   where
 
@@ -32,10 +33,10 @@ import System.IO.Unsafe
 
 import GHC.Vis.View.Graph.Parser
 import GHC.Vis.Types hiding (State, View(..))
+import qualified GHC.Vis.Types as T
 import GHC.Vis.View.Common
 
 import GHC.HeapView hiding (size)
-import GHC.Conc
 
 import Graphics.XDot.Viewer
 import Graphics.XDot.Types hiding (size, w, h)
@@ -170,10 +171,12 @@ drawHoverMenu x = do
 
 -- | Handle a mouse click. If an object was clicked an 'UpdateSignal' is sent
 --   that causes the object to be evaluated and the screen to be updated.
-click :: STM ()
+click :: IO ()
 click = do
-  s <- readTVar state
-  hm <- inHistoryMode
+  (s, hm) <- atomically $ do
+    s <- readTVar state
+    hm <- inHistoryMode
+    return (s, hm)
 
   unless hm $ case iconHover s of
     Nothing -> case hover s of
@@ -182,26 +185,26 @@ click = do
       _ -> return ()
 
     Just (Node t, EvaluateIcon) -> evaluateClick s t
-    Just (Node t, CollapseIcon) -> collapseClick s t
+    Just (Node t, CollapseIcon) -> atomically $ collapseClick s t
     _ -> return ()
   when hm $ case iconHover s of
     -- Don't evaluate when we're back in time, but allow collapsing
-    Just (Node t, CollapseIcon) -> collapseClick s t
+    Just (Node t, CollapseIcon) -> atomically $ collapseClick s t
     _ -> return ()
 
-evaluateClick :: State -> Int -> STM ()
+evaluateClick :: State -> Int -> IO ()
 evaluateClick s t = unless (length (boxes s) <= t) $ do
   evaluate2 $ boxes s !! t
-  writeTQueue visSignal UpdateSignal
+  atomically $ writeTQueue visSignal UpdateSignal
 
 collapseClick :: State -> Int -> STM ()
 collapseClick s t = unless (length (boxes s) <= t) $ do
   hide $ boxes s !! t
   writeTQueue visSignal UpdateSignal
 
-evaluate2 :: Box -> STM ()
+evaluate2 :: Box -> IO ()
 evaluate2 b@(Box a) = do
-  c <- unsafeIOToSTM $ getBoxedClosureData b
+  c <- getBoxedClosureData b
   case c of
     -- ghc: internal error: MUT_ARR_PTRS_FROZEN object entered!
     -- (GHC version 7.4.2 for x86_64_unknown_linux)
@@ -216,9 +219,26 @@ evaluate2 b@(Box a) = do
     ThunkClosure{} -> a `seq` return ()
     APClosure{} -> a `seq` return ()
     PAPClosure{} -> a `seq` return ()
-    _ -> return ()
-  `catchSTM`
-    \(e :: SomeException) -> unsafeIOToSTM $ putStrLn $ "Caught exception while evaluating: " ++ show e
+    BCOClosure{} -> a `seq` return ()
+    APStackClosure{} -> a `seq` return ()
+    SelectorClosure{} -> a `seq` return ()
+    ConstrClosure{} -> a `seq` return ()
+    MutVarClosure{} -> a `seq` return ()
+    MVarClosure{} -> a `seq` return ()
+    MutArrClosure{} -> a `seq` return ()
+    ArrWordsClosure{} -> a `seq` return ()
+    IntClosure{} -> a `seq` return ()
+    Int64Closure{} -> a `seq` return ()
+    WordClosure{} -> a `seq` return ()
+    Word64Closure{} -> a `seq` return ()
+    BlockingQueueClosure{} -> a `seq` return ()
+    AddrClosure{} -> a `seq` return ()
+    UnsupportedClosure{} -> a `seq` return ()
+    OtherClosure{} -> a `seq` return ()
+    DoubleClosure{} -> a `seq` return ()
+    FloatClosure{} -> a `seq` return ()
+  `catch`
+    \(e :: SomeException) -> putStrLn $ "Caught exception while evaluating: " ++ show e
 
 hide :: Box -> STM ()
 hide b = modifyTVar' visHidden (b :)
@@ -268,9 +288,9 @@ move canvas = do
       return $ unless (oldHover == h && isNothing (iconHover oldS)) $ widgetQueueDraw canvas
 
 -- | Something might have changed on the heap, update the view.
-updateObjects :: [NamedBox] -> STM ()
-updateObjects _boxes = do
-  hidden <- readTVar visHidden
-  (ops, bs', _ , size) <- xDotParse hidden
-
-  modifyTVar' state (\s -> s {operations = ops, boxes = bs', totalSize = size, hover = None})
+updateObjects :: [NamedBox] -> IO ()
+updateObjects boxes = do
+  T.State {heapDepth} <- readTVarIO visState
+  hidden <- readTVarIO visHidden
+  (ops, bs', _, size) <- xDotParse heapDepth boxes hidden
+  atomically $ modifyTVar' state (\s -> s {operations = ops, boxes = bs', totalSize = size, hover = None})
